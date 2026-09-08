@@ -22,8 +22,8 @@ class SceneConfigSionna:
         self.nsect = None              # Usually 3, for sector-based coverage
         # self.BS_height_above_roof = 35  # For base station on building
         # self.BS_height_above_ground = 45
-        self.BS_height_above_roof = 45  # For base station on building
-        self.BS_height_above_ground = 55
+        self.BS_height_above_roof = 35  # For base station on building
+        self.BS_height_above_ground = 35
         # self.tn_height_above_roof = 1.2  # For base station on building
         self.tn_height_above_roof = -1.5  # For base station on building
         self.tn_height_above_ground = 1.8

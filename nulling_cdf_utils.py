@@ -200,7 +200,7 @@ def _match_true_g_to_music_u(
         matched_true_idx[int(est_idx)] = int(np.argmax(corr[int(est_idx)]))
 
     matched_g = g_ref[matched_true_idx]
-    matched_rho = corr[np.arange(u_est.shape[0]), matched_true_idx]
+    matched_rho = np.clip(corr[np.arange(u_est.shape[0]), matched_true_idx], 0.0, 1.0)
     return (
         np.asarray(matched_g, dtype=np.float64),
         np.asarray(matched_rho, dtype=np.float64),
@@ -303,6 +303,39 @@ def summarize_sionna_manifold_alignment(
     }
 
 
+
+def summarize_music_covariance_quality(
+    h_ntn_all: np.ndarray,
+    music_lookup: Dict[int, Dict[str, np.ndarray]],
+    *,
+    max_detected_b_terms: str | int | None = "all",
+) -> Dict[str, float]:
+    """Truth-only diagnostics including missed sources; never used by detection."""
+    h = np.asarray(h_ntn_all, dtype=np.complex128)
+    total_power = covered_power = error_squared = truth_squared = 0.0
+    for tx in range(h.shape[2]):
+        vectors = h[:, :, tx, :].reshape(-1, h.shape[3])
+        u_true, g_true = _channel_vectors_to_noncoh_terms(vectors, num_tx_ant=h.shape[3])
+        terms = _extract_tx_music_terms(
+            music_lookup.get(tx, {}), num_tx_ant=h.shape[3],
+            max_detected_b_terms=max_detected_b_terms,
+        )
+        u_est, g_est = terms["u"], terms["g"]
+        truth = _covariance_from_channel_vectors(vectors, num_tx_ant=h.shape[3])
+        estimate = np.einsum("k,ka,kb->ab", g_est, u_est, u_est.conj())
+        error_squared += float(np.linalg.norm(estimate - truth) ** 2)
+        truth_squared += float(np.linalg.norm(truth) ** 2)
+        total_power += float(g_true.sum())
+        active = g_est > 0
+        if len(u_true) and np.any(active):
+            unit_est = u_est[active] / np.maximum(np.linalg.norm(u_est[active], axis=1, keepdims=True), 1e-12)
+            best = np.max(np.abs(u_true @ unit_est.conj().T), axis=1)
+            covered_power += float(g_true[best >= 0.95].sum())
+    return {
+        "covariance_nrmse": float(np.sqrt(error_squared / truth_squared)) if truth_squared else float("nan"),
+        "power_coverage_rho95": covered_power / total_power if total_power else float("nan"),
+    }
+
 def summarize_music_noncoh_quality(
     h_ntn_all: np.ndarray,
     music_lookup: Dict[int, Dict[str, np.ndarray]],
@@ -319,6 +352,7 @@ def summarize_music_noncoh_quality(
     num_tx_ant = int(h_ntn.shape[3])
     u_rho_all: List[np.ndarray] = []
     g_rel_err_all: List[np.ndarray] = []
+    matched_power_all: List[np.ndarray] = []
     tx_with_pairs = 0
 
     for tx_idx in range(num_tx_total):
@@ -356,39 +390,15 @@ def summarize_music_noncoh_quality(
 
             u_est_t = np.asarray(est_inputs["u"], dtype=np.complex128)
             g_est_t = np.asarray(est_inputs["g"], dtype=np.float64)
-            est_norm = np.linalg.norm(u_est_t, axis=1, keepdims=True)
-            true_norm = np.linalg.norm(u_true_all, axis=1, keepdims=True)
-            u_est_n = u_est_t / np.maximum(est_norm, float(eps))
-            u_true_n = u_true_all / np.maximum(true_norm, float(eps))
-            corr = np.abs(u_est_n @ np.conjugate(u_true_n).T)
-
-            matched_true: set[int] = set()
-            u_rho_t: List[float] = []
-            g_rel_err_t: List[float] = []
-            est_order = np.argsort(-np.nan_to_num(g_est_t, nan=0.0))
-            for est_idx in est_order.tolist():
-                if corr.shape[1] == 0:
-                    break
-                cand_order = np.argsort(-corr[est_idx])
-                match_idx = None
-                for cand_idx in cand_order.tolist():
-                    if cand_idx not in matched_true:
-                        match_idx = int(cand_idx)
-                        matched_true.add(match_idx)
-                        break
-                if match_idx is None:
-                    match_idx = int(cand_order[0])
-                u_rho_t.append(float(corr[est_idx, match_idx]))
-                g_rel_err_t.append(
-                    float(
-                        np.abs(g_est_t[est_idx] - g_true_all[match_idx])
-                        / np.maximum(np.abs(g_true_all[match_idx]), float(eps))
-                    )
-                )
+            matched_g, u_rho_t, _ = _match_true_g_to_music_u(
+                u_est_t, u_true_all, g_true_all, eps=eps,
+            )
+            g_rel_err_t = np.abs(g_est_t - matched_g) / np.maximum(matched_g, np.finfo(float).tiny)
 
             if len(u_rho_t) == 0:
                 continue
             tx_with_pairs += 1
+            matched_power_all.append(matched_g)
             u_rho_all.append(np.asarray(u_rho_t, dtype=np.float64))
             g_rel_err_all.append(np.asarray(g_rel_err_t, dtype=np.float64))
             continue
@@ -424,7 +434,7 @@ def summarize_music_noncoh_quality(
             u_est_t,
             eps=eps,
         )
-        g_rel_err_t = np.abs(g_true_t - g_est_t) / np.maximum(np.abs(g_true_t), float(eps))
+        g_rel_err_t = np.abs(g_true_t - g_est_t) / np.maximum(np.abs(g_true_t), np.finfo(float).tiny)
         valid = np.isfinite(u_rho_t) & np.isfinite(g_rel_err_t)
         if not np.any(valid):
             continue
@@ -432,6 +442,7 @@ def summarize_music_noncoh_quality(
         tx_with_pairs += 1
         u_rho_all.append(np.asarray(u_rho_t[valid], dtype=np.float64))
         g_rel_err_all.append(np.asarray(g_rel_err_t[valid], dtype=np.float64))
+        matched_power_all.append(g_true_t[valid])
 
     if len(u_rho_all) == 0:
         return {
@@ -444,12 +455,17 @@ def summarize_music_noncoh_quality(
 
     u_rho_arr = np.concatenate(u_rho_all, axis=0)
     g_rel_err_arr = np.concatenate(g_rel_err_all, axis=0)
+    matched_power = np.concatenate(matched_power_all)
     return {
         "pairs": int(u_rho_arr.size),
         "tx_with_pairs": int(tx_with_pairs),
         "u_rho_mean": float(np.mean(u_rho_arr)),
         "u_err_mean": float(np.mean(1.0 - u_rho_arr)),
         "g_rel_err_mean": float(np.mean(g_rel_err_arr)),
+        "u_rho_median": float(np.median(u_rho_arr)),
+        "u_rho_p10": float(np.quantile(u_rho_arr, 0.1)),
+        "u_rho_power_weighted": float(np.average(u_rho_arr, weights=matched_power)),
+        "g_rel_err_median": float(np.median(g_rel_err_arr)),
     }
 
 
@@ -1040,21 +1056,11 @@ def run_small_round(
     true_sinr_db: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list}
     est_snr_db: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list_music_est}
     est_sinr_db: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list_music_est}
-    music_u_true_g_snr_db: Dict[float, List[float]] = {
-        lambda_: [] for lambda_ in lambda_list_music_est
-    }
-    music_u_true_g_sinr_db: Dict[float, List[float]] = {
-        lambda_: [] for lambda_ in lambda_list_music_est
-    }
     music_real_snr_db: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list_music_real}
     music_real_sinr_db: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list_music_real}
     raw_inr_power = np.zeros((num_ntn_rx,), dtype=np.float64)
     true_inr_power = {lambda_: np.zeros((num_ntn_rx,), dtype=np.float64) for lambda_ in lambda_list}
     est_inr_power = {lambda_: np.zeros((num_ntn_rx,), dtype=np.float64) for lambda_ in lambda_list_music_est}
-    music_u_true_g_inr_power = {
-        lambda_: np.zeros((num_ntn_rx,), dtype=np.float64)
-        for lambda_ in lambda_list_music_est
-    }
     music_real_inr_power = {
         lambda_: np.zeros((num_ntn_rx,), dtype=np.float64) for lambda_ in lambda_list_music_real
     }
@@ -1065,9 +1071,6 @@ def run_small_round(
     raw_beams: Dict[int, np.ndarray] = {}
     true_beams: Dict[float, Dict[int, np.ndarray]] = {lambda_: {} for lambda_ in lambda_list}
     est_beams: Dict[float, Dict[int, np.ndarray]] = {lambda_: {} for lambda_ in lambda_list_music_est}
-    music_u_true_g_beams: Dict[float, Dict[int, np.ndarray]] = {
-        lambda_: {} for lambda_ in lambda_list_music_est
-    }
     music_real_beams: Dict[float, Dict[int, np.ndarray]] = {
         lambda_: {} for lambda_ in lambda_list_music_real
     }
@@ -1123,12 +1126,6 @@ def run_small_round(
             num_tx_ant=h_tn.shape[0],
             eps=eps,
         )
-        g_true_for_music_u_t, _, _ = _match_true_g_to_music_u(
-            u_t,
-            u_true_t,
-            g_true_t,
-            eps=eps,
-        )
         raw_inr_power += _interference_power_per_rx(h_ntn_tx, w_t)
 
         for lambda_ in lambda_list:
@@ -1155,30 +1152,6 @@ def run_small_round(
             est_snr_db[lambda_].append(float(_safe_db(est_snr_linear, eps=eps)))
             est_inr_power[lambda_] += _interference_power_per_rx(h_ntn_tx, v_null_est)
 
-            v_null_music_u_true_g, _, _, _ = nulling_bf_music_noncoh(
-                h_tn,
-                w_r,
-                u_t,
-                g_true_for_music_u_t,
-                lambda_,
-                eps=eps,
-            )
-            music_u_true_g_beams[lambda_][int(tx_idx)] = np.asarray(
-                v_null_music_u_true_g,
-                dtype=np.complex128,
-            )
-            music_u_true_g_snr_linear = (
-                np.abs((v_null_music_u_true_g.conj().T @ h_tn @ w_r).item()) ** 2
-                * float(tx_power)
-                / float(snr_noise_power)
-            )
-            music_u_true_g_snr_db[lambda_].append(
-                float(_safe_db(music_u_true_g_snr_linear, eps=eps))
-            )
-            music_u_true_g_inr_power[lambda_] += _interference_power_per_rx(
-                h_ntn_tx,
-                v_null_music_u_true_g,
-            )
 
         for lambda_ in lambda_list_music_real:
             v_null_music_real, _, _, _ = nulling_bf_music_noncoh(h_tn, w_r, u_true_t, g_true_t,  lambda_, eps=eps)
@@ -1237,24 +1210,6 @@ def run_small_round(
             )
             est_sinr_db[lambda_].append(float(_safe_db(est_sinr_linear, eps=eps)))
 
-            beam_music_u_true_g = music_u_true_g_beams[lambda_][int(tx_idx)]
-            desired_music_u_true_g = _tn_link_power(h_tn, beam_music_u_true_g, w_r)
-            interf_music_u_true_g = 0.0
-            for other_tx in range(num_tx_total):
-                if int(other_tx) == int(tx_idx):
-                    continue
-                h_interf = np.asarray(h_tn_all_arr[tn_idx, :, other_tx, :], dtype=np.complex128).T
-                interf_music_u_true_g += _tn_link_power(
-                    h_interf,
-                    music_u_true_g_beams[lambda_][int(other_tx)],
-                    w_r,
-                )
-            music_u_true_g_sinr_linear = desired_music_u_true_g * float(tx_power) / (
-                float(snr_noise_power) + interf_music_u_true_g * float(tx_power)
-            )
-            music_u_true_g_sinr_db[lambda_].append(
-                float(_safe_db(music_u_true_g_sinr_linear, eps=eps))
-            )
 
         for lambda_ in lambda_list_music_real:
             beam_music_real = music_real_beams[lambda_][int(tx_idx)]
@@ -1302,19 +1257,6 @@ def run_small_round(
         )
         for lambda_ in lambda_list_music_est
     }
-    music_u_true_g_inr_db = {
-        lambda_: (
-            _safe_db(
-                music_u_true_g_inr_power[lambda_][inr_eval_mask]
-                * float(tx_power)
-                / float(inr_noise_power),
-                eps=eps,
-            )
-            if np.any(inr_eval_mask)
-            else np.empty((0,), dtype=np.float64)
-        )
-        for lambda_ in lambda_list_music_est
-    }
     music_real_inr_db = {
         lambda_: (
             _safe_db(
@@ -1338,14 +1280,6 @@ def run_small_round(
         "est_sinr_db": {
             lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in est_sinr_db.items()
         },
-        "music_u_true_g_snr_db": {
-            lambda_: np.asarray(vals, dtype=np.float64)
-            for lambda_, vals in music_u_true_g_snr_db.items()
-        },
-        "music_u_true_g_sinr_db": {
-            lambda_: np.asarray(vals, dtype=np.float64)
-            for lambda_, vals in music_u_true_g_sinr_db.items()
-        },
         "music_real_snr_db": {
             lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in music_real_snr_db.items()
         },
@@ -1355,10 +1289,6 @@ def run_small_round(
         "raw_inr_db": np.asarray(raw_inr_db, dtype=np.float64),
         "true_inr_db": {lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in true_inr_db.items()},
         "est_inr_db": {lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in est_inr_db.items()},
-        "music_u_true_g_inr_db": {
-            lambda_: np.asarray(vals, dtype=np.float64)
-            for lambda_, vals in music_u_true_g_inr_db.items()
-        },
         "music_real_inr_db": {
             lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in music_real_inr_db.items()
         },
@@ -1387,13 +1317,6 @@ def run_small_round(
                 for tx_idx, beam in beam_dict.items()
             }
             for lambda_, beam_dict in est_beams.items()
-        },
-        "music_u_true_g_beams": {
-            float(lambda_): {
-                int(tx_idx): np.asarray(beam, dtype=np.complex128)
-                for tx_idx, beam in beam_dict.items()
-            }
-            for lambda_, beam_dict in music_u_true_g_beams.items()
         },
         "music_real_beams": {
             float(lambda_): {
@@ -1434,6 +1357,8 @@ def run_nulling_cdf_experiment(
     satellite_elevation_range_deg: Tuple[float, float] = (35.0, 90.0),
     satellite_rng_seed: int | None = None,
     max_detected_b_terms: str | int | None = "all",
+    channel_cache_dir: str | Path | None = None,
+    position_rng_seed: int | None = None,
 ) -> Dict[str, Any]:
     """Run the nulling CDF experiment across macro simulations."""
     if int(num_macro_sims) <= 0:
@@ -1459,12 +1384,6 @@ def run_nulling_cdf_experiment(
     true_sinr_all: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list}
     est_snr_all: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list_music_est}
     est_sinr_all: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list_music_est}
-    music_u_true_g_snr_all: Dict[float, List[float]] = {
-        lambda_: [] for lambda_ in lambda_list_music_est
-    }
-    music_u_true_g_sinr_all: Dict[float, List[float]] = {
-        lambda_: [] for lambda_ in lambda_list_music_est
-    }
     music_real_snr_all: Dict[float, List[float]] = {
         lambda_: [] for lambda_ in lambda_list_music_real
     }
@@ -1473,9 +1392,6 @@ def run_nulling_cdf_experiment(
     }
     true_inr_all: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list}
     est_inr_all: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list_music_est}
-    music_u_true_g_inr_all: Dict[float, List[float]] = {
-        lambda_: [] for lambda_ in lambda_list_music_est
-    }
     music_real_inr_all: Dict[float, List[float]] = {
         lambda_: [] for lambda_ in lambda_list_music_real
     }
@@ -1519,7 +1435,15 @@ def run_nulling_cdf_experiment(
             sat_azimuth_deg = float(pos_kwargs["azimuth"])
             sat_elevation_deg = float(pos_kwargs["elevation"])
 
-        scene_config.compute_positions(**pos_kwargs)
+        if position_rng_seed is None:
+            scene_config.compute_positions(**pos_kwargs)
+        else:
+            random_state = np.random.get_state()
+            try:
+                np.random.seed(np.random.SeedSequence([int(position_rng_seed), int(sim_idx)]).generate_state(1)[0])
+                scene_config.compute_positions(**pos_kwargs)
+            finally:
+                np.random.set_state(random_state)
         tx_pos = np.asarray(scene_config.tx_pos, dtype=np.float64)
         sat_look_pos = np.asarray(scene_config.ntn_look_pos, dtype=np.float64).copy()
         if bs_pos_ref is None:
@@ -1554,6 +1478,23 @@ def run_nulling_cdf_experiment(
                 )
             if bool(music_kwargs_sim.get("use_sector_orientation", True)):
                 music_kwargs_sim["tx_orientations_rad"] = scene_tx_orientations
+
+        if channel_cache_dir is not None:
+            cache_dir = Path(channel_cache_dir)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = cache_dir / f"channels_{int(sim_idx):04d}.npz"
+            # Exclusive creation prevents accidentally replacing a comparison input.
+            with cache_path.open("xb") as cache_file:
+                np.savez_compressed(
+                    cache_file, h_tn=h_tn_all, h_ntn=h_ntn_all, tx_pos=tx_pos,
+                    tn_pos=np.asarray(scene_config.tn_pos),
+                    ntn_pos=np.asarray(scene_config.rx_ntn_pos),
+                    satellite_look_pos=sat_look_pos,
+                    satellite_angles_deg=np.array([sat_azimuth_deg, sat_elevation_deg]),
+                    array_positions_local=(scene_array_positions if scene_array_positions is not None else np.empty((0, 3))),
+                    tx_orientations_rad=(scene_tx_orientations if scene_tx_orientations is not None else np.empty((0, 3))),
+                    noise_var=float(music_kwargs_sim.get("detect_noise_var", 0.0)),
+                )
 
         pairing = pair_tn_to_strongest_tx(
             h_tn_all,
@@ -1626,6 +1567,22 @@ def run_nulling_cdf_experiment(
             max_detected_b_terms=resolved_b_term_limit,
             eps=eps,
         )
+        noncoh_metrics.update(summarize_music_covariance_quality(
+            h_ntn_all, music_lookup, max_detected_b_terms=resolved_b_term_limit,
+        ))
+        for key, source in (("fit_before", "covariance_fit_before"), ("fit_after", "covariance_fit_after"),
+                            ("accepted_peak_mean", "accepted_peak_counts")):
+            values = np.asarray(ntn_music_out.get(source, []), dtype=float)
+            values = values[np.isfinite(values)]
+            noncoh_metrics[key] = float(values.mean()) if values.size else float("nan")
+        if channel_cache_dir is not None:
+            with (Path(channel_cache_dir) / f"music_{int(sim_idx):04d}.npz").open("xb") as diagnostics_file:
+                np.savez_compressed(diagnostics_file, **{
+                    key: np.asarray(ntn_music_out[key]) for key in (
+                        "peak_t_idx", "peak_phi_hat_deg", "peak_theta_hat_deg", "peak_u_hat_raw", "peak_g_hat",
+                        "num_sources_record", "accepted_peak_counts", "covariance_fit_before", "covariance_fit_after",
+                    ) if key in ntn_music_out
+                })
         source_count_metrics: Dict[str, Any] = {
             "method": str(np.asarray(ntn_music_out.get("source_count_method", "unknown")).item()),
         }
@@ -1679,7 +1636,13 @@ def run_nulling_cdf_experiment(
                 f"elev_mae_deg={float(angle_metrics.get('elev_mae_deg', np.nan)):.3f} "
                 f"u_rho_mean={float(noncoh_metrics['u_rho_mean']):.6f} "
                 f"u_err_mean={float(noncoh_metrics['u_err_mean']):.6e} "
-                f"g_rel_err_mean={float(noncoh_metrics['g_rel_err_mean']):.6e}"
+                f"g_rel_err_mean={float(noncoh_metrics['g_rel_err_mean']):.6e} "
+                f"u_rho_pw={float(noncoh_metrics.get('u_rho_power_weighted', np.nan)):.6f} "
+                f"coverage95={float(noncoh_metrics['power_coverage_rho95']):.3f} "
+                f"B_nrmse={float(noncoh_metrics['covariance_nrmse']):.3e} "
+                f"cov_refine={bool(ntn_music_out.get('covariance_refine', False))} "
+                f"fit={noncoh_metrics['fit_before']:.3e}->{noncoh_metrics['fit_after']:.3e}",
+                flush=True,
             )
 
         macro_stats.append(
@@ -1746,24 +1709,6 @@ def run_nulling_cdf_experiment(
                 est_inr_all[lambda_].extend(
                     np.asarray(round_out["est_inr_db"][lambda_], dtype=np.float64).tolist()
                 )
-                music_u_true_g_snr_all[lambda_].extend(
-                    np.asarray(
-                        round_out["music_u_true_g_snr_db"][lambda_],
-                        dtype=np.float64,
-                    ).tolist()
-                )
-                music_u_true_g_sinr_all[lambda_].extend(
-                    np.asarray(
-                        round_out["music_u_true_g_sinr_db"][lambda_],
-                        dtype=np.float64,
-                    ).tolist()
-                )
-                music_u_true_g_inr_all[lambda_].extend(
-                    np.asarray(
-                        round_out["music_u_true_g_inr_db"][lambda_],
-                        dtype=np.float64,
-                    ).tolist()
-                )
             for lambda_ in lambda_list_music_real:
                 music_real_snr_all[lambda_].extend(
                     np.asarray(round_out["music_real_snr_db"][lambda_], dtype=np.float64).tolist()
@@ -1787,14 +1732,6 @@ def run_nulling_cdf_experiment(
         "est_sinr_db": {
             lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in est_sinr_all.items()
         },
-        "music_u_true_g_snr_db": {
-            lambda_: np.asarray(vals, dtype=np.float64)
-            for lambda_, vals in music_u_true_g_snr_all.items()
-        },
-        "music_u_true_g_sinr_db": {
-            lambda_: np.asarray(vals, dtype=np.float64)
-            for lambda_, vals in music_u_true_g_sinr_all.items()
-        },
         "music_real_snr_db": {
             lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in music_real_snr_all.items()
         },
@@ -1803,10 +1740,6 @@ def run_nulling_cdf_experiment(
         },
         "true_inr_db": {lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in true_inr_all.items()},
         "est_inr_db": {lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in est_inr_all.items()},
-        "music_u_true_g_inr_db": {
-            lambda_: np.asarray(vals, dtype=np.float64)
-            for lambda_, vals in music_u_true_g_inr_all.items()
-        },
         "music_real_inr_db": {
             lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in music_real_inr_all.items()
         },
@@ -1855,25 +1788,10 @@ def save_experiment_metrics(
         save_dict[f"est_snr_db_{lambda_:.0e}"] = np.asarray(vals, dtype=np.float64)
     for lambda_, vals in experiment_out.get("est_sinr_db", {}).items():
         save_dict[f"est_sinr_db_{lambda_:.0e}"] = np.asarray(vals, dtype=np.float64)
-    for lambda_, vals in experiment_out.get("music_u_true_g_snr_db", {}).items():
-        save_dict[f"music_u_true_g_snr_db_{lambda_:.0e}"] = np.asarray(
-            vals,
-            dtype=np.float64,
-        )
-    for lambda_, vals in experiment_out.get("music_u_true_g_sinr_db", {}).items():
-        save_dict[f"music_u_true_g_sinr_db_{lambda_:.0e}"] = np.asarray(
-            vals,
-            dtype=np.float64,
-        )
     for lambda_, vals in experiment_out["true_inr_db"].items():
         save_dict[f"true_inr_db_{lambda_:.0e}"] = np.asarray(vals, dtype=np.float64)
     for lambda_, vals in experiment_out["est_inr_db"].items():
         save_dict[f"est_inr_db_{lambda_:.0e}"] = np.asarray(vals, dtype=np.float64)
-    for lambda_, vals in experiment_out.get("music_u_true_g_inr_db", {}).items():
-        save_dict[f"music_u_true_g_inr_db_{lambda_:.0e}"] = np.asarray(
-            vals,
-            dtype=np.float64,
-        )
     for lambda_, vals in experiment_out.get("music_real_snr_db", {}).items():
         save_dict[f"music_real_snr_db_{lambda_:.0e}"] = np.asarray(vals, dtype=np.float64)
     for lambda_, vals in experiment_out.get("music_real_sinr_db", {}).items():
@@ -2004,6 +1922,11 @@ def save_experiment_metrics(
             [row.get("source_count_metrics", {}).get("method", "unknown") for row in macro_stats],
             dtype=object,
         )
+        for key in ("u_rho_median", "u_rho_p10", "u_rho_power_weighted", "g_rel_err_median",
+                    "power_coverage_rho95", "covariance_nrmse", "fit_before", "fit_after", "accepted_peak_mean"):
+            save_dict[f"macro_stats_noncoh_{key}"] = np.asarray(
+                [row.get("noncoh_metrics", {}).get(key, np.nan) for row in macro_stats], dtype=float,
+            )
         for label in ("used", "mdl", "rank", "eigengap"):
             save_dict[f"macro_stats_source_count_{label}_mean"] = np.asarray(
                 [

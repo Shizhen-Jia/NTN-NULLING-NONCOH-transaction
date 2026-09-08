@@ -21,7 +21,8 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 import numpy as np
-from scipy.optimize import minimize
+from scipy.ndimage import minimum_filter
+from scipy.optimize import minimize, nnls
 
 
 BLIND_MDL_MUSIC_DETECTION_NAME = "Blind MDL-MUSIC Detection"
@@ -232,28 +233,28 @@ def _estimate_num_sources_mdl(
 ) -> int:
     """Estimate source count with Wax-Kailath MDL."""
     eig = np.real(np.asarray(eigenvalues_desc, dtype=np.float64))
+    if eig.size == 0 or not np.all(np.isfinite(eig)) or float(np.max(eig)) <= 0.0:
+        return 0
+    eig = np.maximum(eig / float(np.max(eig)), np.finfo(np.float64).eps)
     m = eig.shape[0]
     if max_sources is None:
         max_sources = m - 1
     max_sources = int(np.clip(max_sources, 0, m - 1))
 
     # MDL is meaningful with at least a few snapshots.
-    n = int(max(num_snapshots, m + 1))
-    eps = 1e-12
+    n = int(max(num_snapshots, 2))
 
     mdl_vals = np.full(max_sources + 1, np.inf, dtype=np.float64)
     for k in range(max_sources + 1):
-        noise_eigs = np.maximum(eig[k:], eps)
+        noise_eigs = eig[k:]
         p = m - k
         if p <= 0:
             continue
-        gm = np.exp(np.mean(np.log(noise_eigs)))
         am = np.mean(noise_eigs)
-        if am <= eps:
-            continue
         # Wax-Kailath MDL:
         # MDL(k) = -n*(m-k)*log(gm/am) + 0.5*k*(2m-k)*log(n)
-        mdl_vals[k] = -n * p * np.log(gm / am) + 0.5 * k * (2 * m - k) * np.log(n)
+        log_ratio = min(float(np.mean(np.log(noise_eigs)) - np.log(am)), 0.0)
+        mdl_vals[k] = -n * p * log_ratio + 0.5 * k * (2 * m - k) * np.log(n)
 
     return int(np.argmin(mdl_vals))
 
@@ -810,6 +811,8 @@ def music_top_peaks(
     refine_peaks: bool = False,
     refine_half_width_deg: float = 1.0,
     refine_maxiter: int = 40,
+    local_maxima_only: bool = False,
+    max_noise_projection: Optional[float] = None,
 ) -> List[Tuple[float, float, float, np.ndarray]]:
     """Find dominant MUSIC pseudo-spectrum peaks.
 
@@ -818,6 +821,8 @@ def music_top_peaks(
     """
     if en.size == 0 or int(top_n) <= 0:
         return []
+    if max_noise_projection is not None and not 0.0 <= float(max_noise_projection) <= 1.0:
+        raise ValueError("max_noise_projection must be in [0, 1] or None.")
     if float(min_sep_phi_deg) < 0.0 or float(min_sep_theta_deg) < 0.0:
         raise ValueError("MUSIC peak separation values must be nonnegative.")
     if max_peak_correlation is not None and not 0.0 < float(max_peak_correlation) <= 1.0:
@@ -836,7 +841,12 @@ def music_top_peaks(
                 f"expected ({expected_ant}, 3), got {positions.shape}."
             )
 
-    g = en @ en.conj().T
+    phi_values = np.asarray(list(phi_grid_deg), dtype=np.float64)
+    theta_values = np.asarray(list(theta_grid_deg), dtype=np.float64)
+    if phi_values.size == 0 or theta_values.size == 0:
+        return []
+    if not np.all(np.isfinite(phi_values)) or not np.all(np.isfinite(theta_values)):
+        raise ValueError("MUSIC scan angles must be finite.")
     boresight_global = _boresight_global_from_orientation(
         orientation_rad=orientation_rad,
         panel_plane="yz" if array_positions_local is not None else panel_plane,
@@ -868,8 +878,7 @@ def music_top_peaks(
         return float(np.dot(u_global, boresight_global)) >= fwd_cos
 
     def projection_denominator(a: np.ndarray) -> float:
-        den = float(np.real((a.conj().T @ g @ a).item()))
-        return max(den, 0.0)
+        return float(np.sum(np.abs(en.conj().T @ a) ** 2))
 
     def vector_correlation(a: np.ndarray, b: np.ndarray) -> float:
         av = np.asarray(a, dtype=np.complex128).reshape(-1)
@@ -920,21 +929,41 @@ def music_top_peaks(
             return 1.0 / max(den0, spectrum_floor), ph0, th0, a0, den0
         return 1.0 / max(den_ref, spectrum_floor), ph_ref, th_ref, a_ref, den_ref
 
-    cand: List[Tuple[float, float, float, np.ndarray, float]] = []
-    for th in theta_grid_deg:
-        for ph in phi_grid_deg:
-            if not is_forward(float(ph), float(th)):
-                continue
-
-            a = steering_at(float(ph), float(th))
-            den = projection_denominator(a)
-            p = 1.0 / max(den, spectrum_floor)
-            cand.append((p, float(ph), float(th), a, den))
-
-    cand.sort(key=lambda x: x[0], reverse=True)
+    ph_mesh, th_mesh = np.meshgrid(phi_values, theta_values)
+    ph_rad, th_rad = np.deg2rad(ph_mesh.ravel()), np.deg2rad(th_mesh.ravel())
+    directions = np.column_stack((np.sin(th_rad) * np.cos(ph_rad),
+                                  np.sin(th_rad) * np.sin(ph_rad), np.cos(th_rad)))
+    valid = (th_mesh.ravel() >= 0.0) & (th_mesh.ravel() <= 180.0)
+    if forward_only:
+        valid &= directions @ boresight_global >= fwd_cos
+    denominators = np.full(len(directions), np.inf)
+    valid_idx = np.flatnonzero(valid)
+    if array_positions_local is not None:
+        rotation = _rotation_matrix_xyz(*orientation_rad, rotation_order=rotation_order)
+        global_positions = positions @ rotation.T
+        # Chunking bounds memory while reusing BLAS for the exact array dictionary.
+        for start in range(0, len(valid_idx), 2048):
+            ids = valid_idx[start:start + 2048]
+            bank = np.exp(1j * float(array_phase_sign) * 2.0 * np.pi *
+                          (global_positions @ directions[ids].T)) / np.sqrt(len(positions))
+            denominators[ids] = np.sum(np.abs(en.conj().T @ bank) ** 2, axis=0)
+    else:
+        for idx in valid_idx:
+            denominators[idx] = projection_denominator(steering_at(ph_mesh.ravel()[idx], th_mesh.ravel()[idx]))
+    if local_maxima_only:
+        periodic = (phi_values.size > 2 and np.all(np.diff(phi_values) > 0)
+                    and np.allclose(np.diff(phi_values), np.diff(phi_values)[0])
+                    and np.isclose(phi_values[-1] - phi_values[0] + np.diff(phi_values)[0], 360.0))
+        surface = denominators.reshape(ph_mesh.shape)
+        neighbors = minimum_filter(surface, size=3, mode=("nearest", "wrap" if periodic else "nearest"))
+        valid &= (surface <= neighbors).ravel()
+    candidate_idx = np.flatnonzero(valid & np.isfinite(denominators))
+    candidate_idx = candidate_idx[np.argsort(denominators[candidate_idx], kind="stable")]
 
     peaks: List[Tuple[float, float, float, np.ndarray]] = []
-    for _p, ph, th, a, den in cand:
+    for idx in candidate_idx:
+        ph, th = float(ph_mesh.ravel()[idx]), float(th_mesh.ravel()[idx])
+        a, den = steering_at(ph, th), float(denominators[idx])
         if max_peak_correlation is not None and any(
             vector_correlation(a, selected_a) >= float(max_peak_correlation)
             for _, _, _, selected_a in peaks
@@ -952,6 +981,8 @@ def music_top_peaks(
             continue
 
         p, ph, th, a, _den = refine_peak(ph, th, a, den)
+        if max_noise_projection is not None and _den > float(max_noise_projection):
+            continue
         if max_peak_correlation is not None and any(
             vector_correlation(a, selected_a) >= float(max_peak_correlation)
             for _, _, _, selected_a in peaks
@@ -1321,7 +1352,7 @@ def estimate_noise_power_from_music_out(
     tail = tail[np.isfinite(tail)]
     if tail.size == 0:
         return 0.0
-    return float(max(np.mean(tail), float(eps)))
+    return float(max(np.mean(tail), 0.0))
 
 
 def estimate_noncoh_gains_from_covariance(
@@ -1355,12 +1386,125 @@ def estimate_noncoh_gains_from_covariance(
     basis = np.column_stack(
         [np.outer(u_unit[k], np.conjugate(u_unit[k])).reshape(-1) for k in range(u_unit.shape[0])]
     )
-    g_ls, *_ = np.linalg.lstsq(basis, r_sig.reshape(-1), rcond=None)
-    g_hat = np.real(np.asarray(g_ls, dtype=np.complex128).reshape(-1))
-    g_hat[~np.isfinite(g_hat)] = 0.0
-    g_hat = np.maximum(g_hat, 0.0)
+    scale = float(np.linalg.norm(r_sig))
+    if scale == 0.0:
+        return np.zeros(u_unit.shape[0], dtype=np.float64)
+    if not np.isfinite(scale):
+        raise ValueError("Covariance must contain only finite values.")
+    design = np.vstack((basis.real, basis.imag))
+    target = np.concatenate((r_sig.real.ravel(), r_sig.imag.ravel())) / scale
+    g_hat, _ = nnls(design, target, maxiter=max(100, 10 * u_unit.shape[0]))
+    g_hat *= scale
     return np.asarray(g_hat, dtype=np.float64)
 
+
+
+def refine_music_covariance(
+    covariance: np.ndarray,
+    peaks: List[Tuple[float, float, float, np.ndarray]],
+    *,
+    array_positions_local: np.ndarray,
+    orientation_rad: Tuple[float, float, float],
+    en: np.ndarray,
+    noise_power: float,
+    array_phase_sign: int = 1,
+    rotation_order: str = "zyx",
+    forward_cos_min: float = 0.0,
+    max_direction_step: float = 0.1,
+    maxiter: int = 60,
+) -> Tuple[List[Tuple[float, float, float, np.ndarray]], np.ndarray, Dict[str, float]]:
+    """Refine MUSIC directions by covariance fitting with nonnegative gains.
+
+    Optimize local planar direction cosines. Each objective evaluation solves
+    gains first; the envelope gradient updates directions without using truth.
+    Reject infeasible or worse solutions, including boundary roundoff.
+    """
+    if not 0.0 <= forward_cos_min < 1.0:
+        raise ValueError("Refinement requires 0 <= forward_cos_min < 1.")
+    if not np.isfinite(max_direction_step) or max_direction_step <= 0 or int(maxiter) < 1:
+        raise ValueError("Refinement step and iteration limit must be positive.")
+    positions = np.asarray(array_positions_local, dtype=np.float64)
+    if positions.ndim != 2 or positions.shape[1] != 3 or not np.all(np.isfinite(positions)):
+        raise ValueError("Expected finite array positions of shape (M, 3).")
+    positions = positions - positions.mean(axis=0)
+    if not np.allclose(positions[:, 0], 0.0, atol=1e-10):
+        raise ValueError("Refinement currently supports local yz planar arrays.")
+    if not peaks:
+        return [], np.empty(0), {"before": 0.0, "after": 0.0}
+    rxx = np.asarray(covariance, dtype=np.complex128)
+    if rxx.shape != (len(positions), len(positions)):
+        raise ValueError("Covariance and array dimensions differ.")
+    signal = (rxx + rxx.conj().T) / 2 - noise_power * np.eye(len(positions))
+    scale = float(np.linalg.norm(signal))
+    if not np.isfinite(scale):
+        raise ValueError("Covariance must be finite.")
+    if scale == 0.0:
+        return peaks, np.zeros(len(peaks)), {"before": 0.0, "after": 0.0}
+    target = signal / scale
+    rotation = _rotation_matrix_xyz(*orientation_rad, rotation_order=rotation_order)
+    global_dirs = np.array([_unit_vector_from_angles(ph, th) for _, ph, th, _ in peaks])
+    q0 = (global_dirs @ rotation)[:, 1:]
+    radius2 = 1.0 - forward_cos_min ** 2
+    radius = np.sqrt(radius2)
+    axes = float(array_phase_sign) * 2.0 * np.pi * positions[:, 1:]
+    cached_x, cached_result = None, None
+
+    def evaluate(x):
+        nonlocal cached_x, cached_result
+        if cached_x is not None and np.array_equal(cached_x, x):
+            return cached_result
+        q = x.reshape(-1, 2)
+        u = np.exp(1j * (q @ axes.T)) / np.sqrt(len(positions))
+        gains = estimate_noncoh_gains_from_covariance(target, u)
+        residual = np.einsum("k,ka,kb->ab", gains, u, u.conj()) - target
+        value = float(np.vdot(residual, residual).real)
+        ea = (residual @ u.T).T
+        derivatives = 1j * u[:, :, None] * axes[None, :, :]
+        gradient = 4 * gains[:, None] * np.real(np.einsum("kmd,km->kd", derivatives.conj(), ea))
+        cached_x = x.copy()
+        cached_result = value, gradient.ravel(), u, gains
+        return cached_result
+
+    x0 = q0.ravel()
+    initial = evaluate(x0)
+    bounds = list(zip(np.maximum(x0 - max_direction_step, -radius),
+                      np.minimum(x0 + max_direction_step, radius)))
+
+    def disk_jacobian(x):
+        jac = np.zeros((len(peaks), len(x)))
+        for k in range(len(peaks)):
+            jac[k, 2*k:2*k+2] = -2 * x[2*k:2*k+2]
+        return jac
+
+    result = minimize(
+        lambda x: evaluate(x)[:2], x0, jac=True, method="SLSQP", bounds=bounds,
+        constraints=[{"type": "ineq",
+                      "fun": lambda x: radius2 - np.sum(x.reshape(-1, 2) ** 2, axis=1),
+                      "jac": disk_jacobian}],
+        options={"maxiter": int(maxiter), "ftol": 1e-12},
+    )
+    chosen = x0
+    if np.all(np.isfinite(result.x)):
+        feasible = np.all(np.sum(result.x.reshape(-1, 2) ** 2, axis=1) <= radius2 + 1e-10)
+        if feasible and evaluate(result.x)[0] < initial[0]:
+            chosen = result.x
+    q = chosen.reshape(-1, 2).copy()
+    lengths = np.linalg.norm(q, axis=1)
+    outside = lengths > radius
+    q[outside] *= (radius / lengths[outside])[:, None]
+    final = evaluate(q.ravel())
+    if final[0] > initial[0]:
+        q, final = q0, initial
+    directions = np.column_stack((np.sqrt(np.maximum(1 - np.sum(q*q, axis=1), 0)), q)) @ rotation.T
+    refined = []
+    for d, u in zip(directions, final[2]):
+        ph = float(np.rad2deg(np.arctan2(d[1], d[0])) % 360)
+        th = float(np.rad2deg(np.arccos(np.clip(d[2], -1, 1))))
+        den = float(np.sum(np.abs(en.conj().T @ u) ** 2))
+        refined.append((1 / max(den, 1e-30), ph, th, u.reshape(-1, 1)))
+    return refined, final[3] * scale, {
+        "before": float(np.sqrt(initial[0])), "after": float(np.sqrt(final[0]))
+    }
 
 def _parse_manifold_label(label: str) -> Tuple[str, str, int]:
     """Parse labels like 'yz:+1' into canonical `(key, plane, sign)`."""
@@ -2329,6 +2473,11 @@ def _run_music_standard_blind_pipeline(
     peak_refine: bool,
     peak_refine_half_width_deg: float,
     peak_refine_maxiter: int,
+    peak_local_maxima: bool,
+    peak_max_noise_projection: Optional[float],
+    covariance_refine: bool,
+    covariance_refine_maxiter: int,
+    covariance_refine_max_direction_step: float,
     phi_grid_deg: Iterable[float],
     theta_grid_deg: Iterable[float],
 ) -> Dict[str, Any]:
@@ -2352,6 +2501,8 @@ def _run_music_standard_blind_pipeline(
     num_rx, num_rx_ant, num_tx, num_tx_ant = h.shape
     nsect_eff = int(max(int(nsect), 1))
     detection_name = blind_music_detection_name(detect_source_estimation)
+    if covariance_refine:
+        detection_name += " + covariance fit"
 
     manifold_key, panel_plane, phase_sign = _parse_manifold_label(manifold_label)
     phi_off = float(np.round(float(phi_offset_deg) % 360.0, 1))
@@ -2380,6 +2531,9 @@ def _run_music_standard_blind_pipeline(
     num_sources_mdl_record: List[int] = []
     num_sources_rank_record: List[int] = []
     num_sources_eigengap_record: List[int] = []
+    fit_residual_before: List[float] = []
+    fit_residual_after: List[float] = []
+    accepted_peak_counts: List[int] = []
     candidate_metric_log: Dict[str, List[Dict[str, float]]] = {}
     candidate_fit_log: Dict[str, List[Dict[str, float]]] = {}
     selected_metric_log: List[Dict[str, float]] = []
@@ -2453,6 +2607,8 @@ def _run_music_standard_blind_pipeline(
             array_positions_local=array_positions_local,
             array_phase_sign=array_phase_sign,
             top_n=max(int(num_sources_est), 0),
+            local_maxima_only=peak_local_maxima,
+            max_noise_projection=peak_max_noise_projection,
             min_sep_phi_deg=float(peak_min_sep_phi_deg),
             min_sep_theta_deg=float(peak_min_sep_theta_deg),
             max_peak_correlation=peak_max_correlation,
@@ -2461,16 +2617,35 @@ def _run_music_standard_blind_pipeline(
             refine_maxiter=int(peak_refine_maxiter),
         )
 
+        noise_power_hat = (float(detect_noise_var) if detect_covariance_mode == "analytic"
+                           else estimate_noise_power_from_music_out(music_out))
+        fit_diag = {"before": float("nan"), "after": float("nan")}
+        if covariance_refine and peaks:
+            if array_positions_local is None:
+                raise ValueError("covariance_refine requires exact Sionna array positions.")
+            peaks, _, fit_diag = refine_music_covariance(
+                music_out["covariance"], peaks, array_positions_local=array_positions_local,
+                orientation_rad=orientation_rad, en=en, noise_power=noise_power_hat,
+                array_phase_sign=array_phase_sign, rotation_order=rotation_order,
+                forward_cos_min=float(sector_forward_cos_min) if sector_forward_only else 0.0,
+                max_direction_step=covariance_refine_max_direction_step,
+                maxiter=covariance_refine_maxiter,
+            )
+        fit_residual_before.append(fit_diag["before"])
+        fit_residual_after.append(fit_diag["after"])
         if len(peaks) > 0:
             u_hat_mode_arr = np.vstack(
                 [np.asarray(a, dtype=np.complex128).reshape(1, -1) for _p, _ph, _th, a in peaks]
             )
-            noise_power_hat = estimate_noise_power_from_music_out(music_out)
             g_hat_arr = estimate_noncoh_gains_from_covariance(
                 music_out["covariance"],
                 u_hat_mode_arr,
                 noise_power=noise_power_hat,
             )
+            active = g_hat_arr > 0.0
+            peaks = [peak for peak, keep in zip(peaks, active) if keep]
+            u_hat_mode_arr = u_hat_mode_arr[active]
+            g_hat_arr = g_hat_arr[active]
             peak_score_arr = np.asarray([float(p) for p, _ph, _th, _a in peaks], dtype=np.float64)
             if channel_mode == "conj":
                 u_hat_raw_arr = np.conjugate(u_hat_mode_arr)
@@ -2492,6 +2667,7 @@ def _run_music_standard_blind_pipeline(
             h_hat_mode_arr = np.empty((0, num_tx_ant), dtype=np.complex128)
             h_hat_raw_arr = np.empty((0, num_tx_ant), dtype=np.complex128)
 
+        accepted_peak_counts.append(len(peaks))
         peak_phi_store_t: List[float] = []
         peak_theta_store_t: List[float] = []
 
@@ -2748,6 +2924,10 @@ def _run_music_standard_blind_pipeline(
         "num_sources_mdl_record": np.asarray(num_sources_mdl_record, dtype=int),
         "num_sources_rank_record": np.asarray(num_sources_rank_record, dtype=int),
         "num_sources_eigengap_record": np.asarray(num_sources_eigengap_record, dtype=int),
+        "accepted_peak_counts": np.asarray(accepted_peak_counts, dtype=int),
+        "covariance_fit_before": np.asarray(fit_residual_before, dtype=float),
+        "covariance_fit_after": np.asarray(fit_residual_after, dtype=float),
+        "covariance_refine": bool(covariance_refine),
         "candidate_metric_log": candidate_metric_log,
         "candidate_fit_log": candidate_fit_log,
         "selected_metric_log": selected_metric_log,
@@ -2821,6 +3001,11 @@ def run_music_standard_pipeline(
     peak_refine: bool = False,
     peak_refine_half_width_deg: float = 1.0,
     peak_refine_maxiter: int = 40,
+    peak_local_maxima: bool = True,
+    peak_max_noise_projection: Optional[float] = 0.2,
+    covariance_refine: bool = False,
+    covariance_refine_maxiter: int = 60,
+    covariance_refine_max_direction_step: float = 0.1,
     phi_grid_deg: Optional[Iterable[float]] = None,
     theta_grid_deg: Optional[Iterable[float]] = None,
 ) -> Dict[str, Any]:
@@ -2895,6 +3080,15 @@ def run_music_standard_pipeline(
         for t_i in list(pair_keys_by_tx.keys()):
             pair_keys_by_tx[t_i] = sorted(set(pair_keys_by_tx[t_i]))
 
+    if covariance_refine:
+        if pair_keys_by_tx is not None or array_positions_local is None:
+            raise ValueError("covariance_refine requires blind mode and exact array positions.")
+        if not sector_forward_only or not 0.0 <= float(sector_forward_cos_min) < 1.0:
+            raise ValueError("covariance_refine requires a front-side search with 0 <= cos_min < 1.")
+        if (not np.isfinite(covariance_refine_max_direction_step)
+                or covariance_refine_max_direction_step <= 0 or covariance_refine_maxiter < 1):
+            raise ValueError("Covariance refinement step and iteration limit must be positive.")
+
     if pair_keys_by_tx is None:
         return _run_music_standard_blind_pipeline(
             h,
@@ -2935,6 +3129,11 @@ def run_music_standard_pipeline(
             peak_refine=peak_refine,
             peak_refine_half_width_deg=peak_refine_half_width_deg,
             peak_refine_maxiter=peak_refine_maxiter,
+            peak_local_maxima=peak_local_maxima,
+            peak_max_noise_projection=peak_max_noise_projection,
+            covariance_refine=covariance_refine,
+            covariance_refine_maxiter=covariance_refine_maxiter,
+            covariance_refine_max_direction_step=covariance_refine_max_direction_step,
             phi_grid_deg=phi_grid_deg,
             theta_grid_deg=theta_grid_deg,
         )
