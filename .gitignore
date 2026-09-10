@@ -26,3 +26,6 @@ overleaf_ntn_spawc/
 musiccheck/
 rightfolder/
 Denver_scene/
+
+# Paper repository managed separately
+/overleaf_ntn_paper/
