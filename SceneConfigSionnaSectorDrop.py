@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 from tn_sector_drop import SectorTNSampler, channel_dominance
 from ntn_music_detection import collapse_cir_to_narrowband
+from multipath_support import resolve_propagation_options
 import sionna
 from satellite_projection import satellite_projection
 from sionna.rt import PathSolver, PlanarArray
@@ -19,7 +20,7 @@ class SceneConfigSionna:
         """
         self.scene = scene
         
-        self.fc = 10e9
+        self.fc = 7e9
 
         # Some default parameters you can modify:
         self.grid_size = 1.0
@@ -436,7 +437,8 @@ class SceneConfigSionna:
                       bandwidth=100e6, tx_power_dbm=30,
                       sector_yaw_offset_rad=None,
                       sector_pitch_rad=None,
-                      sector_roll_rad=None):
+                      sector_roll_rad=None,
+                      multipath=None, ntn_los_mode="natural", propagation_options=None):
         """
         1) Configure scene frequency and remove old TX/RX
         2) Add TX, add TN array and receivers => compute TN CIR
@@ -445,6 +447,9 @@ class SceneConfigSionna:
             If None, use current object defaults:
             self.tx_sector_yaw_offset_rad / self.tx_sector_pitch_rad / self.tx_sector_roll_rad.
         """
+        self.tn_solver_options, self.ntn_solver_options = resolve_propagation_options(
+            multipath, max_depth, ntn_los_mode, propagation_options)
+        max_depth = self.tn_solver_options["max_depth"]
         if sector_yaw_offset_rad is None:
             sector_yaw_offset_rad = self.tx_sector_yaw_offset_rad
         if sector_pitch_rad is None:
@@ -560,18 +565,47 @@ class SceneConfigSionna:
                 rx.look_at(self.ntn_look_pos+self.rx_ntn_pos[i])
 
             
-            self.paths_ntn = p_solver(scene=self.scene,
-                                    max_depth=max_depth,
-                                    los=True,
-                                    specular_reflection=True,
-                                    diffuse_reflection=False,
-                                    refraction=True,
-                                    synthetic_array=True)
-                                    # seed=41)
-            
+            self.paths_ntn = p_solver(scene=self.scene, **self.ntn_solver_options)
+
             # Compute paths for TN
 
             self.a_ntn, self.tau_ntn = self.paths_ntn.cir(normalize_delays=False, out_type="numpy")
+
+    def compute_ntn_ul_paths(self, frequency_hz, *, max_depth=3):
+        """Trace the reciprocal NTN link at UL frequency with fixed BS geometry.
+
+        Run compute_paths at the DL reference frequency first. The same endpoints,
+        orientations, element patterns and single-element NTN receiver are used.
+        Sionna traces BS->NTN; reciprocity supplies the corresponding UL channel
+        in the existing TX-array column-vector convention. No TNs are redropped.
+        Only electrical spacing changes: p_UL/lambda_UL =
+        (f_UL/f_DL) * p_DL/lambda_DL. DL scene state is restored even on failure.
+        """
+        frequency_hz = float(frequency_hz)
+        if not np.isfinite(frequency_hz) or frequency_hz <= 0:
+            raise ValueError("UL frequency must be finite and positive.")
+        if self.ntn_rx <= 0 or not hasattr(self, "a_ntn"):
+            raise ValueError("Trace a nonempty NTN DL scene before UL sensing.")
+        if frequency_hz == float(self.fc):
+            return self.paths_ntn, self.a_ntn, self.tau_ntn
+        if set(self.scene.receivers) != {f"ntn-{i}" for i in range(len(self.rx_ntn_pos))}:
+            raise ValueError("UL sensing requires the retained NTN receivers from compute_paths.")
+        dl_frequency = float(np.asarray(self.scene.frequency).item())
+        array = self.scene.tx_array
+        dl_positions = array.normalized_positions
+        try:
+            self.scene.frequency = frequency_hz
+            array.normalized_positions = dl_positions * (frequency_hz / dl_frequency)
+            # Match the DL depth, LOS policy, propagation mechanisms and seed.
+            options = getattr(self, "ntn_solver_options", dict(
+                max_depth=max_depth, los=True, specular_reflection=True,
+                diffuse_reflection=False, refraction=True, synthetic_array=True))
+            paths = PathSolver()(scene=self.scene, **options)
+            a, tau = paths.cir(normalize_delays=False, out_type="numpy")
+            return paths, a, tau
+        finally:
+            array.normalized_positions = dl_positions
+            self.scene.frequency = dl_frequency
 
     def _trace_tn_candidates(self, p_solver, max_depth):
         for name in list(self.scene.receivers):
@@ -582,11 +616,10 @@ class SceneConfigSionna:
             rx = sionna.rt.Receiver(name=f"tn-{i}", position=pos, color=[0.0, 1.0, 0.0])
             self.scene.add(rx)
             rx.look_at(self.tx_pos[self.tn_bs_index[i]])
-        paths = p_solver(
-            scene=self.scene, max_depth=max_depth, los=True,
-            specular_reflection=True, diffuse_reflection=False,
-            refraction=True, synthetic_array=True,
-        )
+        options = getattr(self, "tn_solver_options", dict(
+            max_depth=max_depth, los=True, specular_reflection=True,
+            diffuse_reflection=False, refraction=True, synthetic_array=True))
+        paths = p_solver(scene=self.scene, **options)
         a, tau = paths.cir(normalize_delays=False, out_type="numpy")
         return paths, a, tau
 

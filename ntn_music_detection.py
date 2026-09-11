@@ -24,6 +24,9 @@ import numpy as np
 from scipy.ndimage import minimum_filter
 from scipy.optimize import minimize, nnls
 
+# Re-export the shared CIR helper for existing notebook/module imports.
+from multipath_support import collapse_cir_to_narrowband
+
 
 BLIND_MDL_MUSIC_DETECTION_NAME = "Blind MDL-MUSIC Detection"
 BLIND_MDL_MUSIC_MODEL_SUMMARY = "Rxx ~= sum_k g_k u_k u_k^H + sigma^2 I"
@@ -48,26 +51,6 @@ def _as_complex_array(x: np.ndarray) -> np.ndarray:
 def _to_numpy(x: Any) -> np.ndarray:
     """Convert tensor-like objects to NumPy arrays without changing values."""
     return x.numpy() if hasattr(x, "numpy") else np.asarray(x)
-
-
-def collapse_cir_to_narrowband(cir: np.ndarray) -> np.ndarray:
-    """Collapse CIR to narrowband channel tensor with stable axis order.
-
-    Expected CIR axis order from Sionna:
-        [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths, num_time_steps]
-    The function sums over all trailing axes after tx-ant, returning:
-        h_all.shape == (num_rx, num_rx_ant, num_tx, num_tx_ant)
-    """
-    h = _as_complex_array(cir)
-    if h.ndim < 4:
-        raise ValueError(
-            "cir must have at least 4 dims: "
-            "[num_rx, num_rx_ant, num_tx, num_tx_ant, ...]."
-        )
-    if h.ndim == 4:
-        return h
-    sum_axes = tuple(range(4, h.ndim))
-    return np.sum(h, axis=sum_axes)
 
 
 def extract_hi_for_tx(
@@ -392,6 +375,7 @@ def detect_ntn_music_from_hi(
     rank_noise_margin: float = 1e-3,
     reduce_ntn_ant: Literal["max", "mean"] = "max",
     compute_user_scores: bool = True,
+    covariance_override: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
     """Run narrowband MUSIC detection for one BS/sector channel tensor.
 
@@ -433,6 +417,11 @@ def detect_ntn_music_from_hi(
         by the blind anonymous detector, which treats `(u_k, g_k)` peaks as the
         primary outputs and computes any per-user mapping only for evaluation.
 
+    covariance_override : ndarray | None
+        Optional preprocessed covariance, in the same channel convention as hi.
+        Used for spatial smoothing. No synthetic independent path signals are
+        generated. hi is used only for dimensions and optional user diagnostics.
+
     Returns
     -------
     Dict[str, np.ndarray]
@@ -462,7 +451,20 @@ def detect_ntn_music_from_hi(
 
     p_2d = _broadcast_powers(user_powers, num_ntn=num_ntn, num_ntn_ant=num_ntn_ant)
 
-    if covariance_mode == "analytic":
+    if covariance_mode not in ("analytic", "sample"):
+        raise ValueError("covariance_mode must be 'analytic' or 'sample'.")
+    if covariance_override is not None:
+        rxx = np.asarray(covariance_override, dtype=np.complex128)
+        if rxx.shape != (num_bs_ant, num_bs_ant) or not np.all(np.isfinite(rxx)):
+            raise ValueError("covariance_override must be a finite M by M matrix.")
+        scale = np.linalg.norm(rxx)
+        if np.linalg.norm(rxx-rxx.conj().T) > 1e-8*scale:
+            raise ValueError("covariance_override must be Hermitian.")
+        rxx = (rxx+rxx.conj().T)/2
+        if np.linalg.eigvalsh(rxx)[0] < -1e-8*scale:
+            raise ValueError("covariance_override must be positive semidefinite.")
+        n_for_mdl = int(num_snapshots) if covariance_mode == "sample" else max(num_ntn*num_ntn_ant, num_bs_ant+1)
+    elif covariance_mode == "analytic":
         rxx = _covariance_from_static_channels(hi_c, p_2d, noise_var)
         n_for_mdl = max(num_ntn * num_ntn_ant, num_bs_ant + 1)
     elif covariance_mode == "sample":
