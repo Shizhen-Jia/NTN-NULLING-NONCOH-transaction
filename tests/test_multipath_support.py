@@ -1,4 +1,7 @@
 """Physical multipath synthesis, coherent DOA recovery, NLOS and regression checks."""
+import ast
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -54,15 +57,18 @@ class CoherentToyScene:
 
     def __init__(self):
         self.position_calls = self.dl_calls = 0
+        self.ul_depths = []
     def compute_positions(self, **kw):
         self.position_calls += 1
     def compute_paths(self, **kw):
         self.dl_calls += 1
+        self.last_path_kwargs = kw.copy()
         self.paths_ntn, self.a_ntn, self.tau_ntn = path_fixture(los=kw.get('ntn_los_mode') != 'nlos_only')
         u = nmd.array_position_steering_global(5,90,positions()).ravel()
         self.a_tn = (2e-5*u).reshape(1,1,1,64,1,1)
         self.tau_tn = np.zeros((1,1,1))
     def compute_ntn_ul_paths(self, frequency_hz, **kw):
+        self.ul_depths.append(kw['max_depth'])
         return path_fixture(frequency_hz/self.fc)
 
 
@@ -101,18 +107,49 @@ class MultipathTests(unittest.TestCase):
         with self.assertRaises(ValueError):mp.collapse_cir_to_narrowband(a)
         with self.assertRaises(ValueError):mp.collapse_cir_to_narrowband(np.ones((2,2,2)))
 
-    def test_zero_disables_all_multipath_options(self):
-        tn,ntn=mp.resolve_propagation_options(0,2,'nlos_only',dict(diffraction=True,seed=1))
+    def test_max_depth_is_passed_through_without_an_enable_switch(self):
+        for depth in (0,1,2,4):
+            tn,ntn=mp.resolve_propagation_options(depth,'natural')
+            self.assertEqual(tn['max_depth'],depth)
+            self.assertEqual(ntn['max_depth'],depth)
+            self.assertTrue(tn['los']);self.assertTrue(ntn['los'])
+        tn,ntn=mp.resolve_propagation_options(0,'natural')
         expected=dict(max_depth=0,los=True,specular_reflection=True,
                       diffuse_reflection=False,refraction=True,synthetic_array=True)
         self.assertEqual(tn,expected);self.assertEqual(ntn,expected)
 
     def test_nlos_policy_does_not_remove_tn_los(self):
-        tn,ntn=mp.resolve_propagation_options(1,2,'nlos_only',dict(seed=123,diffraction=True))
+        tn,ntn=mp.resolve_propagation_options(2,'nlos_only',dict(seed=123,diffraction=True))
         self.assertTrue(tn['los']);self.assertFalse(ntn['los'])
         self.assertEqual(ntn['seed'],123);self.assertEqual(ntn['max_depth'],2)
-        with self.assertRaises(ValueError):mp.resolve_propagation_options(1,0,'natural')
-        with self.assertRaises(ValueError):mp.resolve_propagation_options(1,2,'natural',dict(los=False))
+        # Even at zero depth, honor the Sionna LOS flag rather than overriding it.
+        _,ntn=mp.resolve_propagation_options(0,'nlos_only')
+        self.assertFalse(ntn['los'])
+        with self.assertRaises(ValueError):mp.resolve_propagation_options(2,'natural',dict(los=False))
+
+    def test_notebook_uses_one_depth_parameter_for_paths_and_estimation(self):
+        from scipy.stats import chi2
+        notebook=json.loads(Path('Nulling_CDF_SectorDrop.ipynb').read_text())
+        parameters=''.join(notebook['cells'][3]['source'])
+        setup=ast.parse(''.join(notebook['cells'][4]['source']))
+        assignments=[node for node in setup.body if isinstance(node,ast.Assign)
+                     and any(isinstance(t,ast.Name) and t.id in ('compute_paths_kwargs_mc','music_kwargs_mc')
+                             for t in node.targets)]
+        for depth in (0,1,3):
+            scope=dict(np=np,mps=mp,nmd=nmd,ncu=ncu,chi2=chi2)
+            with contextlib.redirect_stdout(io.StringIO()):
+                exec(parameters.replace('max_depth = 0\n',f'max_depth = {depth}\n'),scope)
+                exec(compile(ast.Module(body=assignments,type_ignores=[]),'notebook setup','exec'),scope)
+            self.assertNotIn('multipath',scope)
+            self.assertNotIn('multipath_max_depth',scope)
+            self.assertEqual(scope['compute_paths_kwargs_mc']['max_depth'],depth)
+            self.assertNotIn('multipath',scope['compute_paths_kwargs_mc'])
+            self.assertEqual(scope['music_kwargs_mc']['covariance_refine'],depth==0)
+
+    def test_invalid_max_depth_is_rejected(self):
+        for depth in (-1, .5, float('nan'), float('inf'), True, None, '2'):
+            with self.assertRaises(ValueError):mp.resolve_propagation_options(depth)
+        self.assertEqual(mp.validate_max_depth(np.int64(2)),2)
 
     def test_smoothing_restores_two_coherent_directions_and_full_array_powers(self):
         _,a,_=path_fixture()
@@ -218,7 +255,7 @@ class MultipathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.object(ncu,'_scene_tx_array_positions_local',return_value=positions()):
             out=ncu.run_nulling_cdf_experiment(
                 scene,num_macro_sims=1,compute_positions_kwargs=dict(azimuth=0.,elevation=40.),
-                compute_paths_kwargs=dict(fc=7e9,max_depth=1),multipath=1,
+                compute_paths_kwargs=dict(fc=7e9,max_depth=2),
                 multipath_music_kwargs=dict(top_k=1),ul_frequency_percentages=[-5,0,5],
                 h_tn_th=0.,tx_antennas=64,tx_power=1.,snr_noise_power=1e-13,inr_noise_power=1e-13,
                 lambda_ranges_music_est=[1e10,1e11],lambda_ranges_music_real=[1e10],
@@ -226,6 +263,10 @@ class MultipathTests(unittest.TestCase):
                 channel_cache_dir=Path(tmp)/'channels')
             self.assertEqual((scene.position_calls,scene.dl_calls),(1,1))
             self.assertEqual(out['num_estimated_curves'],6)
+            self.assertEqual(out['max_depth'],2)
+            self.assertEqual(scene.last_path_kwargs['max_depth'],2)
+            self.assertNotIn('multipath',scene.last_path_kwargs)
+            self.assertEqual(scene.ul_depths,[2,2])
             reference=out['by_percentage'][0]['raw_inr_db']
             for case in out['by_percentage'].values():
                 np.testing.assert_array_equal(case['raw_inr_db'],reference)
@@ -237,7 +278,7 @@ class MultipathTests(unittest.TestCase):
                 np.testing.assert_array_equal(archive['a_ntn'],scene.a_ntn)
             file=ncu.save_experiment_metrics(out,result_dir=tmp)
             with np.load(file,allow_pickle=False) as archive:
-                self.assertEqual(archive['multipath'],1)
+                self.assertEqual(archive['max_depth'],2)
                 report=json.loads(archive['ul_000/path_metrics_dl_json'][0])
                 self.assertEqual(report['valid_paths'],2)
                 self.assertIn('ul_000/est_inr_db_index_000',archive)

@@ -1416,7 +1416,6 @@ def run_nulling_cdf_experiment(
     position_rng_seed: int | None = None,
     ul_frequency_percentages: Iterable[float] | None = None,
     ul_to_dl_mode: str = "angle",
-    multipath: int = 0,
     multipath_music_kwargs: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Run macro simulations, optionally sweeping UL frequencies on fixed DL drops.
@@ -1426,16 +1425,16 @@ def run_nulling_cdf_experiment(
     every lambda. DL channels and TN scheduling are shared across percentages.
     Angle transfer rebuilds DL steering with UL-estimated angles, retaining UL
     power weights (no oracle DL gain calibration). raw mode reuses UL vectors.
+    compute_paths_kwargs["max_depth"] (default 0) is the sole propagation-depth
+    control: zero uses the original estimator; positive depths use path estimation.
     """
-    if multipath not in (0, 1):
-        raise ValueError("multipath must be 0 or 1.")
     compute_paths_kwargs = dict(compute_paths_kwargs)
-    if multipath:
-        compute_paths_kwargs["multipath"] = 1
-        if int(compute_paths_kwargs.get("max_depth", 0)) < 1:
-            raise ValueError("multipath=1 requires a positive max_depth.")
-    elif compute_paths_kwargs.get("multipath", 0):
-        raise ValueError("Experiment and path generation multipath switches disagree.")
+    max_depth = mps.validate_max_depth(compute_paths_kwargs.get("max_depth", 0))
+    compute_paths_kwargs["max_depth"] = max_depth
+    music_kwargs = dict(music_kwargs)
+    if max_depth > 0:
+        # The correlated path estimator replaces diagonal covariance refinement.
+        music_kwargs["covariance_refine"] = False
     percentages = validate_ul_frequency_percentages(
         [0.0] if ul_frequency_percentages is None else ul_frequency_percentages
     )
@@ -1562,7 +1561,7 @@ def run_nulling_cdf_experiment(
         h_tn_all = collapse_cir_to_narrowband(scene_config.a_tn)
         h_ntn_all = collapse_cir_to_narrowband(scene_config.a_ntn)
         dl_path_catalog = None
-        if multipath:
+        if max_depth > 0:
             dl_path_catalog = mps.build_path_catalog(
                 scene_config.paths_ntn, scene_config.a_ntn, scene_config.tau_ntn)
 
@@ -1604,7 +1603,7 @@ def run_nulling_cdf_experiment(
                     noise_var=float(music_kwargs_sim.get("detect_noise_var", 0.0)),
                 )
 
-        if multipath and channel_cache_dir is not None:
+        if max_depth > 0 and channel_cache_dir is not None:
             with (Path(channel_cache_dir) / f"paths_dl_{sim_idx:04d}.npz").open("xb") as stream:
                 np.savez_compressed(
                     stream, a_tn=scene_config.a_tn, tau_tn=scene_config.tau_tn,
@@ -1645,7 +1644,7 @@ def run_nulling_cdf_experiment(
                 h_ntn_sensing = h_ntn_all
             else:
                 sensing_paths, sensing_cir, sensing_tau = scene_config.compute_ntn_ul_paths(
-                    sensing_frequency_hz, max_depth=int(compute_paths_kwargs.get("max_depth", 3)),
+                    sensing_frequency_hz, max_depth=max_depth,
                 )
                 h_ntn_sensing = collapse_cir_to_narrowband(sensing_cir)
             sensing_array_positions = (
@@ -1670,7 +1669,7 @@ def run_nulling_cdf_experiment(
                             ul_frequency_percent=percentage,
                             array_positions_local_ul=sensing_array_positions,
                         )
-            if multipath:
+            if max_depth > 0:
                 ntn_music_out = mps.run_multipath_music_pipeline(
                     h_ntn_sensing, music_kwargs=music_kwargs_sim,
                     **(multipath_music_kwargs or {}))
@@ -1685,7 +1684,7 @@ def run_nulling_cdf_experiment(
                 )
             )
             path_metrics_ul, path_metrics_dl = {}, {}
-            if multipath:
+            if max_depth > 0:
                 ul_catalog = mps.build_path_catalog(sensing_paths, sensing_cir, sensing_tau)
                 path_metrics_ul = mps.summarize_path_estimates(
                     ul_catalog, ntn_music_out, nsect=int(music_kwargs_sim["nsect"]),
@@ -1710,13 +1709,16 @@ def run_nulling_cdf_experiment(
                         np.savez_compressed(stream, a=sensing_cir, tau_raw=sensing_tau,
                             **{key: value for key, value in ul_catalog.items() if key != "path_channels"})
             else:
-                ntn_truth = build_ntn_truth_from_paths(
-                    sensing_paths,
-                    sensing_cir,
-                    num_tx_total=num_tx_total,
-                    nsect=int(music_kwargs_sim["nsect"]),
-                    sionna_phi_is_global=bool(sionna_phi_is_global),
-                )
+                if np.asarray(sensing_cir).ndim >= 5 and np.asarray(sensing_cir).shape[4] == 0:
+                    ntn_truth = {"pair_map": {}}
+                else:
+                    ntn_truth = build_ntn_truth_from_paths(
+                        sensing_paths,
+                        sensing_cir,
+                        num_tx_total=num_tx_total,
+                        nsect=int(music_kwargs_sim["nsect"]),
+                        sionna_phi_is_global=bool(sionna_phi_is_global),
+                    )
                 if scene_array_positions is not None and scene_tx_orientations is not None:
                     manifold_alignment = summarize_sionna_manifold_alignment(
                         h_ntn_sensing,
@@ -1754,7 +1756,7 @@ def run_nulling_cdf_experiment(
             detected_rx_union = np.asarray(ntn_music_out.get("detected_rx_indices_unique", []), dtype=int)
             interfered_ntn_count = int(np.count_nonzero(np.any(np.abs(h_ntn_all) > eps, axis=(1, 2, 3))))
             pair_counts_by_tx = np.asarray(pairing["pair_counts_by_tx"], dtype=int)
-            diagnostic_channels = dl_path_catalog["path_channels"] if multipath else h_ntn_all
+            diagnostic_channels = dl_path_catalog["path_channels"] if max_depth > 0 else h_ntn_all
             noncoh_metrics = summarize_music_noncoh_quality(
                 diagnostic_channels,
                 music_lookup,
@@ -1887,7 +1889,7 @@ def run_nulling_cdf_experiment(
                     inr_noise_power=float(inr_noise_power),
                     max_detected_b_terms=resolved_b_term_limit,
                     print_music_u_corr=bool(print_music_u_corr),
-                    oracle_path_channels=(dl_path_catalog["path_channels"] if multipath else None),
+                    oracle_path_channels=(dl_path_catalog["path_channels"] if max_depth > 0 else None),
                     eps=eps,
                 )
 
@@ -1945,8 +1947,8 @@ def run_nulling_cdf_experiment(
             "ul_frequency_hz": dl_frequency_hz * (1.0 + percentage / 100.0),
             "dl_frequency_hz": dl_frequency_hz,
             "ul_to_dl_mode": ul_to_dl_mode,
-            "multipath": int(multipath),
-            "oracle_model": "true_dl_paths" if multipath else "true_dl_effective_channels",
+            "max_depth": max_depth,
+            "oracle_model": "true_dl_paths" if max_depth > 0 else "true_dl_effective_channels",
             "raw_snr_db": np.asarray(raw_snr_all, dtype=np.float64),
             "raw_sinr_db": np.asarray(raw_sinr_all, dtype=np.float64),
             "raw_inr_db": np.asarray(raw_inr_all, dtype=np.float64),
@@ -1980,7 +1982,7 @@ def run_nulling_cdf_experiment(
     if ul_frequency_percentages is None:
         return case_results[0.0]
     return {
-        "multipath": int(multipath),
+        "max_depth": max_depth,
         "by_percentage": case_results,
         "ul_frequency_percentages": np.asarray(percentages),
         "dl_frequency_hz": dl_frequency_hz,
@@ -2005,7 +2007,7 @@ def save_experiment_metrics(
             "dl_frequency_hz": np.asarray(experiment_out["dl_frequency_hz"]),
             "ul_to_dl_mode": np.asarray(experiment_out["ul_to_dl_mode"]),
             "num_estimated_curves": np.asarray(experiment_out["num_estimated_curves"]),
-            "multipath": np.asarray(experiment_out.get("multipath", 0)),
+            "max_depth": np.asarray(experiment_out.get("max_depth", 0)),
         }
         for index, case in enumerate(experiment_out["by_percentage"].values()):
             case_file = save_experiment_metrics(
@@ -2035,7 +2037,7 @@ def save_experiment_metrics(
         ),
         "max_detected_b_terms": np.asarray([str(experiment_out.get("max_detected_b_terms", "all"))]),
     }
-    for key in ("ul_frequency_percent", "ul_frequency_hz", "dl_frequency_hz", "ul_to_dl_mode", "multipath", "oracle_model"):
+    for key in ("ul_frequency_percent", "ul_frequency_hz", "dl_frequency_hz", "ul_to_dl_mode", "max_depth", "oracle_model"):
         if key in experiment_out:
             save_dict[key] = np.asarray(experiment_out[key])
     # Indexed copies preserve distinct arbitrary lambdas that round to the same

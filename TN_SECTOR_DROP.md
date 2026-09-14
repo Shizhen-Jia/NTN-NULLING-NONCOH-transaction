@@ -282,12 +282,11 @@ A small end-to-end Denver run used one macro, three frequencies, two lambdas,
 `Nulling_CDF_SectorDrop.ipynb` now imports the shared
 `multipath_support.collapse_cir_to_narrowband` helper. The existing
 `ntn_music_detection.collapse_cir_to_narrowband` import remains compatible.
-The default is **`multipath = 0`**, retaining the old propagation, estimation,
+The default is **`max_depth = 0`**, retaining the old propagation, estimation,
 and numerical CDF results. To enable the extension, change the parameter cell:
 
 ```python
-multipath = 1
-multipath_max_depth = 2
+max_depth = 2  # Sionna maximum path interaction depth
 ntn_los_mode = "natural"  # or "nlos_only"
 music_spatial_smoothing = True
 music_smoothing_rows = 6
@@ -299,10 +298,16 @@ multipath_energy_fraction = 1.0
 
 Rerun the parameter cell and all subsequent cells. After loading updated Python
 modules, restart the kernel and run all cells so an old scene instance is not
-retained. Multipath options are inactive when `multipath=0`, including the NLOS
-stress-test setting. Disabling multipath sets trace depth to zero and uses the
-original diagonal covariance refinement. Enabling it selects the correlated
-multipath pipeline and disables that incompatible diagonal refinement.
+retained. `max_depth` is the only propagation-depth control and is passed to
+Sionna unchanged for TN DL, NTN DL and NTN UL. It specifies the maximum number
+of interactions along a path, not how many paths must exist. There is no separate
+`multipath` enable switch. Zero depth uses the original estimator; positive depth
+automatically selects coherent-path estimation and replaces diagonal covariance
+refinement with the correlated fit. Logs, plot titles and result archives record
+`max_depth` so runs with depths 1, 2, etc. remain distinguishable. If omitted from
+`run_nulling_cdf_experiment`'s path arguments, the experiment explicitly uses 0.
+Other Sionna propagation settings remain available. At zero depth, disabling NTN
+LOS leaves no NTN path; that case is reported without fabricating indirect paths.
 
 `natural` includes all valid direct and indirect paths that the environment and
 selected propagation mechanisms support. A link is classified as NLOS if it has
@@ -314,8 +319,9 @@ rule. A link with no valid path is reported separately; it is not called NLOS.
 
 Depth, reflection/refraction/scattering/diffraction switches, tracing budgets,
 and solver seed are shared between NTN UL and DL. Direct-path mode preserves
-the original solver defaults. Multipath defaults to specular reflection and
-refraction, depth 2, 100,000 launched samples and a 100,000 path cap per source.
+the original solver defaults. For positive depths, the notebook defaults to specular reflection and
+refraction, 100,000 launched samples and a 100,000 path cap per source.
+Choose the depth directly with `max_depth`; the notebook starts at 0.
 Diffuse scattering and diffraction are configurable and disabled by default;
 scattering also requires suitable nonzero material scattering coefficients.
 Path finding at finite sampling budgets is approximate. Raising the depth or
@@ -392,7 +398,7 @@ requirements, and sample-mode MDL on overlapping smoothed data is a heuristic.
 ### Path diagnostics and reproducibility
 
 Common DL caches now additionally include `channels/paths_dl_<macro>.npz` when
-multipath is enabled. They contain full TN/NTN CIRs and delays, valid-path masks,
+`max_depth > 0`. They contain full TN/NTN CIRs and delays, valid-path masks,
 BS departure angles, powers, direct-path indicators and interaction types.
 Per-frequency `paths_ul_<macro>.npz` files retain the corresponding UL data.
 
@@ -432,7 +438,7 @@ Run all tests in the Sionna environment:
 Multipath validation includes a two-path single-UE rank-1 covariance becoming
 rank 2 after smoothing, recovery of both directions and full-array powers,
 signed FDD transfer, and unchanged full-channel evaluation after top-K selection.
-Pre-change CDF arrays were also saved and compared exactly with disabled mode.
+Pre-change CDF arrays were also saved and compared exactly at `max_depth=0`.
 Real Sionna tests used a direct-plus-reflected link and its direct-path-removed
 variant at three frequencies. A small Denver run exercised 12 TNs, eight NTN UEs,
 an 8x8 array, three frequencies and two lambdas through saving and CDF plotting.

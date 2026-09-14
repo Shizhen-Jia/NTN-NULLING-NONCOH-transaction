@@ -80,21 +80,22 @@ def collapse_cir_to_narrowband(
     return summed if time_index is None else summed[..., 0]
 
 
-def resolve_propagation_options(multipath, max_depth, ntn_los_mode, options=None):
-    """Shared, explicit solver options for TN DL, NTN DL and reciprocal NTN UL."""
-    if multipath not in (None, 0, 1):
-        raise ValueError("multipath must be 0 or 1 (None preserves the legacy depth API).")
+def validate_max_depth(max_depth):
+    """Validate Sionna's maximum interaction depth without changing its value."""
+    if (isinstance(max_depth, (bool, np.bool_))
+            or not isinstance(max_depth, (int, float, np.integer, np.floating))
+            or not np.isfinite(max_depth) or max_depth < 0 or int(max_depth) != max_depth):
+        raise ValueError("max_depth must be a nonnegative integer.")
+    return int(max_depth)
+
+
+def resolve_propagation_options(max_depth, ntn_los_mode="natural", options=None):
+    """Pass the configured depth to TN DL, NTN DL and reciprocal NTN UL."""
+    max_depth = validate_max_depth(max_depth)
     if ntn_los_mode not in ("natural", "nlos_only"):
         raise ValueError("ntn_los_mode must be 'natural' or 'nlos_only'.")
-    if int(max_depth) != max_depth or max_depth < 0:
-        raise ValueError("max_depth must be a nonnegative integer.")
     base = dict(los=True, specular_reflection=True, diffuse_reflection=False,
-                refraction=True, synthetic_array=True, max_depth=int(max_depth))
-    if multipath == 0:
-        base["max_depth"] = 0
-        return base, dict(base)
-    if multipath == 1 and max_depth < 1:
-        raise ValueError("multipath=1 requires max_depth >= 1.")
+                refraction=True, synthetic_array=True, max_depth=max_depth)
     allowed = {"specular_reflection", "diffuse_reflection", "refraction", "diffraction",
                "edge_diffraction", "diffraction_lit_region", "samples_per_src",
                "max_num_paths_per_src", "seed"}
