@@ -1,4 +1,5 @@
 """Physical multipath synthesis, coherent DOA recovery, NLOS and regression checks."""
+import re
 import ast
 import contextlib
 import io
@@ -138,7 +139,7 @@ class MultipathTests(unittest.TestCase):
         for depth in (0,1,3):
             scope=dict(np=np,mps=mp,nmd=nmd,ncu=ncu,chi2=chi2)
             with contextlib.redirect_stdout(io.StringIO()):
-                exec(parameters.replace('max_depth = 0\n',f'max_depth = {depth}\n'),scope)
+                exec(re.sub(r'(?m)^max_depth = [0-9]+$', f'max_depth = {depth}', parameters),scope)
                 exec(compile(ast.Module(body=assignments,type_ignores=[]),'notebook setup','exec'),scope)
             self.assertNotIn('multipath',scope)
             self.assertNotIn('multipath_max_depth',scope)
@@ -257,6 +258,7 @@ class MultipathTests(unittest.TestCase):
                 scene,num_macro_sims=1,compute_positions_kwargs=dict(azimuth=0.,elevation=40.),
                 compute_paths_kwargs=dict(fc=7e9,max_depth=2),
                 multipath_music_kwargs=dict(top_k=1),ul_frequency_percentages=[-5,0,5],
+                ul_dl_power_correction=True,
                 h_tn_th=0.,tx_antennas=64,tx_power=1.,snr_noise_power=1e-13,inr_noise_power=1e-13,
                 lambda_ranges_music_est=[1e10,1e11],lambda_ranges_music_real=[1e10],
                 music_kwargs=music_kwargs(),show_progress=False,print_music_u_corr=False,
@@ -274,6 +276,11 @@ class MultipathTests(unittest.TestCase):
                 self.assertEqual(case['macro_stats'][0]['path_metrics_dl']['estimated_paths'],1)
                 self.assertEqual(case['est_inr_db'][1e10].size,1)
                 self.assertEqual(case['oracle_model'],'true_dl_paths')
+            for index, p in enumerate((-5, 0, 5)):
+                with np.load(Path(tmp)/f'channels/ul_{index:03d}/music_0000.npz') as archive:
+                    np.testing.assert_allclose(archive['peak_g_used_for_dl'], archive['peak_g_hat']*(1+p/100)**2)
+                    self.assertIn('correlated_source_covariance', archive)
+                    self.assertTrue(archive['ul_dl_power_correction'])
             with np.load(Path(tmp)/'channels/paths_dl_0000.npz') as archive:
                 np.testing.assert_array_equal(archive['a_ntn'],scene.a_ntn)
             file=ncu.save_experiment_metrics(out,result_dir=tmp)

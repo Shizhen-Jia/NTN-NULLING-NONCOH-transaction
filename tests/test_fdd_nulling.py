@@ -52,7 +52,7 @@ class ToyScene:
 
 
 class FddTests(unittest.TestCase):
-    def run_toy(self, percentages=None, mode="angle", directory=None):
+    def run_toy(self, percentages=None, mode="angle", directory=None, power_correction=None, lambda_values=None):
         scene = ToyScene()
         music = dict(
             tx_rows=4, tx_cols=4, nsect=1, detect_num_sources=1,
@@ -67,13 +67,68 @@ class FddTests(unittest.TestCase):
                 scene, num_macro_sims=2,
                 compute_positions_kwargs=dict(azimuth=0., elevation=40.),
                 compute_paths_kwargs=dict(fc=7e9),
-                lambda_ranges_music_est=[1e10, 1.2e10], lambda_ranges_music_real=[1e10],
+                lambda_ranges_music_est=([1e10, 1.2e10] if lambda_values is None else lambda_values), lambda_ranges_music_real=[1e10],
                 h_tn_th=0., tx_antennas=16, tx_power=1.,
                 snr_noise_power=1e-13, inr_noise_power=1e-13,
                 music_kwargs=music, ul_frequency_percentages=percentages, ul_to_dl_mode=mode,
                 show_progress=False, print_music_u_corr=False, channel_cache_dir=directory,
+                **({} if power_correction is None else {"ul_dl_power_correction": power_correction}),
             )
         return scene, out
+
+    def test_power_correction_off_is_legacy_and_zero_is_unchanged(self):
+        percentages = [-20, 0, 20]
+        _, legacy = self.run_toy(percentages)
+        _, off = self.run_toy(percentages, power_correction=False)
+        _, on = self.run_toy(percentages, power_correction=True)
+        for p in percentages:
+            a, b, c = (sweep['by_percentage'][p] for sweep in (legacy, off, on))
+            self.assertEqual(b['ul_dl_power_scale'], 1.)
+            self.assertAlmostEqual(c['ul_dl_power_scale'], (1+p/100)**2)
+            for metric in ('inr', 'snr', 'sinr'):
+                np.testing.assert_array_equal(b[f'raw_{metric}_db'], c[f'raw_{metric}_db'])
+                np.testing.assert_array_equal(b[f'music_real_{metric}_db'][1e10], c[f'music_real_{metric}_db'][1e10])
+                for lam in a['lambda_ranges_music_est']:
+                    np.testing.assert_array_equal(a[f'est_{metric}_db'][lam], b[f'est_{metric}_db'][lam])
+                    if p == 0:
+                        np.testing.assert_array_equal(b[f'est_{metric}_db'][lam], c[f'est_{metric}_db'][lam])
+        for bad in ('False', 1, None):
+            if bad is None:
+                continue  # None in the test helper means omit the API keyword.
+            with self.assertRaises(ValueError):
+                self.run_toy([0], power_correction=bad)
+
+    def test_power_correction_matches_lambda_scaling_in_both_transfer_modes(self):
+        for mode in ('angle', 'raw'):
+            for p in (-20, 20):
+                scale = (1+p/100)**2
+                _, on = self.run_toy([p], mode, power_correction=True, lambda_values=[1e10])
+                _, equivalent = self.run_toy([p], mode, power_correction=False, lambda_values=[1e10*scale])
+                for metric in ('inr', 'snr', 'sinr'):
+                    np.testing.assert_allclose(
+                        on['by_percentage'][p][f'est_{metric}_db'][1e10],
+                        equivalent['by_percentage'][p][f'est_{metric}_db'][1e10*scale],
+                        rtol=0, atol=1e-9)
+
+    def test_power_correction_archive_keeps_ul_estimates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, off = self.run_toy([-20, 0, 20], directory=root/'off', power_correction=False)
+            _, on = self.run_toy([-20, 0, 20], directory=root/'on', power_correction=True)
+            for index, p in enumerate((-20, 0, 20)):
+                name = f'ul_{index:03d}/music_0000.npz'
+                with np.load(root/'off'/name) as a, np.load(root/'on'/name) as b:
+                    np.testing.assert_array_equal(a['peak_g_hat'], b['peak_g_hat'])
+                    np.testing.assert_array_equal(a['peak_u_used_for_dl'], b['peak_u_used_for_dl'])
+                    np.testing.assert_array_equal(a['peak_g_used_for_dl'], a['peak_g_hat'])
+                    np.testing.assert_allclose(b['peak_g_used_for_dl'], b['peak_g_hat']*(1+p/100)**2)
+                    self.assertTrue(b['ul_dl_power_correction'])
+            path = ncu.save_experiment_metrics(on, result_dir=root/'metrics')
+            with np.load(path, allow_pickle=False) as z:
+                self.assertTrue(z['ul_dl_power_correction'])
+                for index, p in enumerate((-20, 0, 20)):
+                    self.assertAlmostEqual(z[f'ul_{index:03d}/ul_dl_power_scale'], (1+p/100)**2)
+                    self.assertTrue(z[f'ul_{index:03d}/ul_dl_power_correction'])
 
     def test_ul_tracer_keeps_physical_array_and_restores_dl_on_failure(self):
         # Execute the production method without requiring Sionna for unit tests.

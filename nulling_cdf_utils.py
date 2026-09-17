@@ -1416,6 +1416,7 @@ def run_nulling_cdf_experiment(
     position_rng_seed: int | None = None,
     ul_frequency_percentages: Iterable[float] | None = None,
     ul_to_dl_mode: str = "angle",
+    ul_dl_power_correction: bool = False,
     multipath_music_kwargs: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Run macro simulations, optionally sweeping UL frequencies on fixed DL drops.
@@ -1423,8 +1424,10 @@ def run_nulling_cdf_experiment(
     With ul_frequency_percentages=None the legacy single-frequency API is kept.
     Otherwise return by_percentage[pct], each containing the legacy metrics for
     every lambda. DL channels and TN scheduling are shared across percentages.
-    Angle transfer rebuilds DL steering with UL-estimated angles, retaining UL
-    power weights (no oracle DL gain calibration). raw mode reuses UL vectors.
+    Angle transfer rebuilds DL steering with UL-estimated angles; raw reuses UL
+    vectors. By default both retain UL power weights. ul_dl_power_correction=True
+    scales the estimated DL penalty weights by (f_UL/f_DL)**2 after detection,
+    using a free-space gain approximation, without any DL truth calibration.
     compute_paths_kwargs["max_depth"] (default 0) is the sole propagation-depth
     control: zero uses the original estimator; positive depths use path estimation.
     """
@@ -1438,6 +1441,9 @@ def run_nulling_cdf_experiment(
     percentages = validate_ul_frequency_percentages(
         [0.0] if ul_frequency_percentages is None else ul_frequency_percentages
     )
+    if not isinstance(ul_dl_power_correction, (bool, np.bool_)):
+        raise ValueError("ul_dl_power_correction must be a boolean.")
+    ul_dl_power_correction = bool(ul_dl_power_correction)
     if ul_to_dl_mode not in {"angle", "raw"}:
         raise ValueError("ul_to_dl_mode must be 'angle' or 'raw'.")
     if ul_frequency_percentages is not None and music_kwargs.get("pair_keys") is not None:
@@ -1447,6 +1453,11 @@ def run_nulling_cdf_experiment(
         raise ValueError("The FDD sweep requires an explicit DL fc in compute_paths_kwargs.")
     if not np.isfinite(dl_frequency_hz) or dl_frequency_hz <= 0:
         raise ValueError("DL frequency must be finite and positive.")
+    power_scales = {
+        p: (float((dl_frequency_hz * (1.0 + p / 100.0) / dl_frequency_hz)**2)
+            if ul_dl_power_correction else 1.0)
+        for p in percentages
+    }
     if int(num_macro_sims) <= 0:
         raise ValueError("num_macro_sims must be positive.")
     resolved_b_term_limit = _resolve_b_term_limit(max_detected_b_terms)
@@ -1746,6 +1757,14 @@ def run_nulling_cdf_experiment(
                 ntn_music_out, dl_array_positions=scene_array_positions,
                 music_kwargs=music_kwargs_sim, num_tx=num_tx_total,
             ) if percentage != 0.0 and ul_to_dl_mode == "angle" else ntn_music_out
+            power_scale = power_scales[percentage]
+            if power_scale != 1.0:
+                # Copy before changing weights: all detector outputs remain UL
+                # diagnostics. Angles, peak selection, Q_UL, and DL truth stay intact.
+                downlink_music_out = dict(downlink_music_out)
+                downlink_music_out["peak_g_hat"] = (
+                    np.asarray(ntn_music_out["peak_g_hat"], dtype=np.float64) * power_scale
+                )
             music_lookup = build_music_tx_lookup(
                 downlink_music_out,
                 num_ntn_rx=num_ntn_rx,
@@ -1775,6 +1794,9 @@ def run_nulling_cdf_experiment(
                 with (case_cache_dir / f"music_{int(sim_idx):04d}.npz").open("xb") as diagnostics_file:
                     np.savez_compressed(diagnostics_file,
                         peak_u_used_for_dl=np.asarray(downlink_music_out.get("peak_u_hat_raw", [])),
+                        peak_g_used_for_dl=np.asarray(downlink_music_out.get("peak_g_hat", [])),
+                        ul_dl_power_correction=np.asarray(ul_dl_power_correction),
+                        ul_dl_power_scale=np.asarray(power_scale),
                         ul_to_dl_mode=np.asarray(ul_to_dl_mode), **{
                         key: np.asarray(ntn_music_out[key]) for key in (
                             "peak_t_idx", "peak_phi_hat_deg", "peak_theta_hat_deg", "peak_u_hat_raw", "peak_g_hat",
@@ -1843,6 +1865,8 @@ def run_nulling_cdf_experiment(
                     f"u_rho_pw={float(noncoh_metrics.get('u_rho_power_weighted', np.nan)):.6f} "
                     f"coverage95={float(noncoh_metrics['power_coverage_rho95']):.3f} "
                     f"B_nrmse={float(noncoh_metrics['covariance_nrmse']):.3e} "
+                    f"power_correction={'on' if ul_dl_power_correction else 'off'} "
+                    f"power_scale={power_scale:g} "
                     f"cov_refine={bool(ntn_music_out.get('covariance_refine', False))} "
                     f"fit={noncoh_metrics['fit_before']:.3e}->{noncoh_metrics['fit_after']:.3e}",
                     flush=True,
@@ -1947,6 +1971,8 @@ def run_nulling_cdf_experiment(
             "ul_frequency_hz": dl_frequency_hz * (1.0 + percentage / 100.0),
             "dl_frequency_hz": dl_frequency_hz,
             "ul_to_dl_mode": ul_to_dl_mode,
+            "ul_dl_power_correction": ul_dl_power_correction,
+            "ul_dl_power_scale": power_scales[percentage],
             "max_depth": max_depth,
             "oracle_model": "true_dl_paths" if max_depth > 0 else "true_dl_effective_channels",
             "raw_snr_db": np.asarray(raw_snr_all, dtype=np.float64),
@@ -1987,6 +2013,7 @@ def run_nulling_cdf_experiment(
         "ul_frequency_percentages": np.asarray(percentages),
         "dl_frequency_hz": dl_frequency_hz,
         "ul_to_dl_mode": ul_to_dl_mode,
+        "ul_dl_power_correction": ul_dl_power_correction,
         "lambda_ranges_music_est": np.asarray(lambda_list_music_est),
         "num_estimated_curves": len(percentages) * len(lambda_list_music_est),
     }
@@ -2006,6 +2033,7 @@ def save_experiment_metrics(
             "ul_frequency_percentages": np.asarray(experiment_out["ul_frequency_percentages"]),
             "dl_frequency_hz": np.asarray(experiment_out["dl_frequency_hz"]),
             "ul_to_dl_mode": np.asarray(experiment_out["ul_to_dl_mode"]),
+            "ul_dl_power_correction": np.asarray(experiment_out.get("ul_dl_power_correction", False)),
             "num_estimated_curves": np.asarray(experiment_out["num_estimated_curves"]),
             "max_depth": np.asarray(experiment_out.get("max_depth", 0)),
         }
@@ -2037,7 +2065,7 @@ def save_experiment_metrics(
         ),
         "max_detected_b_terms": np.asarray([str(experiment_out.get("max_detected_b_terms", "all"))]),
     }
-    for key in ("ul_frequency_percent", "ul_frequency_hz", "dl_frequency_hz", "ul_to_dl_mode", "max_depth", "oracle_model"):
+    for key in ("ul_frequency_percent", "ul_frequency_hz", "dl_frequency_hz", "ul_to_dl_mode", "ul_dl_power_correction", "ul_dl_power_scale", "max_depth", "oracle_model"):
         if key in experiment_out:
             save_dict[key] = np.asarray(experiment_out[key])
     # Indexed copies preserve distinct arbitrary lambdas that round to the same

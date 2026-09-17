@@ -117,6 +117,8 @@ def save_summary(result_dir, experiment):
                 quantiles = np.percentile(finite, [10, 50, 90]) if finite.size else (None,)*3
                 rows.append(dict(ul_percentage=float(percentage),
                                  ul_frequency_hz=float(case["ul_frequency_hz"]),
+                                 ul_dl_power_correction=bool(case.get("ul_dl_power_correction", False)),
+                                 ul_dl_power_scale=float(case.get("ul_dl_power_scale", 1.0)),
                                  metric=metric, method=method, lambda_value=lam,
                                  macro_count=len(case["macro_stats"]), count=int(data.size),
                                  finite_count=int(finite.size), p10_db=quantiles[0],
