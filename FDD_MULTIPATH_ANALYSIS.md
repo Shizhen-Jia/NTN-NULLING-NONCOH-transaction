@@ -15,6 +15,8 @@ $$
 
 这里必须区分三个数学对象：**物理信道中的相干路径和**、**估计时允许相关的路径协方差**、**波束设计中的非相干方向惩罚**。实验名称中的 NONCOH 指第三项，不能据此把真实多径信道改成路径功率之和。
 
+还必须区分 **BS 设计波束时可获得的信息**与**仿真器评估性能时掌握的真实信道**。本文的 UL 感知流程构造加权方向泄漏指标，不假设 BS 已知每个 NTN UE 的 DL 接收天线增益、接收噪声或真实 INR。联合设计中可使用的泄漏约束见第 7.1 节。
+
 ### 1. 记号、阵列流形与适用范围
 
 先固定一个 BS sector，省略 sector 下标。令 $q=(k,r)$ 表示 NTN UE $k$ 的第 $r$ 个接收天线分支，$\ell\in\mathcal P_q$ 表示该链路的一条有效路径。当前快照模型将不同 $q$ 视为独立信号源；同一个 $q$ 的所有路径共享一个波形。单天线 UE 时，$q$ 就是 UE 编号。
@@ -119,7 +121,7 @@ $$
 \tag{8}
 $$
 
-**不是为每条 ray 独立生成 $s_{q\ell}[n]$。** 那样会人为消除路径相关项，得到另一个非相干传播模型。配置的 `music_noise_var` 就是这里的 $\sigma^2$；默认 $p_q=1$ 时，后续拟合的路径功率无需再除以源功率。
+**不是为每条 ray 独立生成 $s_{q\ell}[n]$。** 那样会人为消除路径相关项，得到另一个非相干传播模型。配置的 `music_noise_var` 就是这里的 BS 侧感知噪声 $\sigma^2$，不是 NTN UE 接收端的噪声。默认 $p_q=1$ 是仿真源功率的归一化约定，不表示被动监听的 BS 已知实际 UE 发射功率；仅在该约定下，理想拟合的路径权重才无需再除以源功率即可对应 $|\beta_{q\ell}(f_{\mathrm U})|^2$。
 
 将所有路径展开，定义
 
@@ -251,6 +253,8 @@ $\dagger$ 表示伪逆；当前截断阈值为最大奇异值的 $10^{-8}$。ana
 
 在方向准确、无失配且 $A_{\mathrm U}$ 满列秩时，$A_{\mathrm U}^{\dagger}A_{\mathrm U}=I$，即使真实 $Q_{\mathrm U}$ 因相干而奇异，也能从理想全阵列协方差恢复它。单用户两径时，两个对角元分别为 $p|\beta_1|^2,p|\beta_2|^2$。强相关角度使 $\widehat A_{\mathrm U}$ 病态，误差会被伪逆放大；重合方向则无法唯一拆分各径功率。
 
+因此，一般情况下 $\widehat g_{i,\mathrm U}$ 估计的是包含源功率的有效 UL 路径权重 $p_q|\beta_{q\ell}(f_{\mathrm U})|^2$。有效信道还包含两端在相应路径方向上的天线响应、极化和传播损耗；BS 不能仅凭该乘积分别识别 UE 发射功率、UE 天线增益与传播损耗。当前拟合不按未知的 UE 发射功率去归一化，也不把匿名峰映射到特定 UE。因此，这些权重既不是已知的纯传播增益，也不是去掉 NTN 天线影响后的入射功率。
+
 拟合残差 $\|R_{\mathrm{sig}}-\widehat A_{\mathrm U}\widehat Q_{\mathrm U}\widehat A_{\mathrm U}^H\|_F/\|R_{\mathrm{sig}}\|_F$ 和 $\operatorname{cond}(\widehat A_{\mathrm U})$ 用于诊断。拟合允许完整相关矩阵，不假设每个峰独立，也不需要事先知道哪些峰属于同一 UE。
 
 ### 6. 路径选择与 FDD 迁移的数学含义
@@ -287,6 +291,8 @@ $$
 
 路径对 $\ell,m$ 的相关项会额外包含 $e^{-j2\pi\Delta f(\tau_{q\ell}-\tau_{qm})}$ 和材料/天线响应变化。当前 MUSIC 流程没有估计时延或材料频率响应，无法由 UL 相关相位可靠重建这些 DL 交叉项。式 (22) 的功率修正仅近似自由空间频率缩放，不补偿式 (23) 的相位，也不保证 UL/DL 可见路径集合完全相同。
 
+式 (22) 的 $\widehat g_{i,\mathrm D}$ 应理解为**用于 DL 波束设计的迁移权重**，不是已经标定的 NTN UE 端 DL 接收功率。它保留 UL 源功率和天线响应的影响；频率缩放不能恢复未知的 UE DL 接收增益。满足互易条件且天线配置不变时，同频有效信道可以隐含天线响应，无需单独拆分每个增益；这不等于 FDD 两个频率的有效信道或收发增益相同。互易性的适用背景见 [Purdue 互易性讲义](https://engineering.purdue.edu/wcchew/ece604f19/Lecture%20Notes/Lect30.pdf)。
+
 固定间距 $d=c/(2f_{\mathrm D})$ 时，UL 电间距为 $df_{\mathrm U}/c=f_{\mathrm U}/(2f_{\mathrm D})$。按 DL 重建流形可以校正已知的频率尺度，但不能修复 UL 阶段已经出现的角度误判、栅瓣混淆或漏检。
 
 ### 7. 非相干零陷目标与闭式特征向量解
@@ -301,7 +307,7 @@ v^H\widehat B_{\mathrm D}v=
 \tag{24}
 $$
 
-该二次型惩罚每个方向上的泄漏，不使用不同方向之间的相位抵消。若另外假设路径相对相位独立、均匀随机，逐径功率和也可解释为相位平均后的泄漏；**当前静态仿真没有施加该随机相位平均假设**，这里将其作为设计准则。
+该二次型是**基于 UL 感知的加权方向泄漏代理指标**，不使用不同方向之间的相位抵消。只有进一步具备正确的 DL 路径功率标定与路径覆盖，并假设路径相对相位独立、均匀随机时，相应逐径功率和才可解释为相位平均后的真实接收泄漏；**当前静态仿真没有施加该随机相位平均假设**，迁移权重也不保证满足这些标定条件，这里将其作为设计准则。
 
 对服务 TN 用户，令 $H_0\in\mathbb C^{M\times N_r}$ 为完整相干 DL 信道矩阵，$w_r$ 为基线 SVD 给出的接收合并器，$h_0=H_0w_r$，$\widetilde h_0=h_0/(\|h_0\|+\epsilon)$。固定 $w_r$ 后，优化为
 
@@ -323,6 +329,43 @@ $$
 
 其中 $\widehat A_{\mathcal S}$ 收集正权重的所选 DL 流形。若它张满全空间，则不存在非零严格零陷波束。统一放大所有权重 $s_f$ 等价于把式 (25) 的 $\lambda$ 放大 $s_f$，所以功率修正也改变信号/干扰折中强度。
 
+#### 7.1 联合设计中的可用泄漏约束
+
+若扩展到发射功率与波束的联合设计，恢复 sector 下标 $b$，令 $P_b$ 为 DL 发射功率、$\|v_b\|=1$，并用每个 sector 的匿名峰集合构造式 (24) 的 $\widehat B_{b,\mathrm D}$。可计算的设计指标为
+
+$$
+\widehat{\mathcal L}_b(P_b,v_b)
+=P_b v_b^H\widehat B_{b,\mathrm D}v_b
+=P_b\sum_{i\in\mathcal S_b}\widehat g_{bi,\mathrm D}
+|v_b^H\widehat{\mathbf u}_{bi,\mathrm D}|^2.
+\tag{26a}
+$$
+
+$\widehat{\mathcal L}_b$ 是按 UL 权重衡量的发射泄漏，不是 $\mathrm{INR}_k$，也不是不含接收天线增益的物理功率。泄漏门限 $\eta_b\ge0$ 必须采用与该指标一致的功率归一化和量纲；没有额外标定时，不能将它直接设为 NTN UE 的接收功率门限或将 INR 的 dB 门限代入。
+
+例如，在同一时频资源上每个 sector 至多调度一个 TN 用户、每个 sector 一条发射流，并固定 TN 用户关联与接收合并器、具备所需 TN 侧 CSI 的条件下，功率与波束的联合设计可写成
+
+$$
+\begin{aligned}
+\max_{\{P_b,v_b\}_{b\in\mathcal B}}\quad
+&\sum_{j\in\mathcal J_{\mathrm{TN}}}\omega_j
+\log_2\!\left(1+\mathrm{SINR}_j(\{P_b,v_b\})\right)\\
+\text{subject to}\quad
+&0\le P_b\le P_b^{\max}, &&\forall b\in\mathcal B,\\
+&\|v_b\|^2=1, &&\forall b\in\mathcal B,\\
+&\widehat{\mathcal L}_b(P_b,v_b)\le\eta_b, &&\forall b\in\mathcal B.
+\end{aligned}
+\tag{26b}
+$$
+
+这里 $\mathcal B$ 是 sector 集合，$\mathcal J_{\mathrm{TN}}$ 是已调度 TN 用户集合，$\omega_j\ge0$ 是给定的用户权重，$\mathrm{SINR}_j$ 采用式 (28) 的固定合并器模型。各行依次表示最大化 TN 加权和频谱效率、限制 sector 发射功率、将波束形状与功率分开表示、限制每个 sector 的 UL 感知泄漏。若另有调度或资源约束，仍需在该设计中明确列出。
+
+最后一行按 **sector $b$** 约束该 sector 的全部所选方向，不是按 **NTN UE $k$** 约束其接收干扰。当前匿名峰没有 UE 身份关联，因此不能直接构造逐 UE 的泄漏预算。即使每个 sector 都满足式 (26b)，也不能据此保证每个 NTN UE 汇总所有 BS 干扰后的真实 INR 达标；未被 UL 检出的 UE 或路径也没有因此获得保护保证。
+
+固定 $P_b>0$ 时，该约束可写成 $v_b^H\widehat B_{b,\mathrm D}v_b\le\eta_b/P_b$；若 $P_b$ 是优化变量，就必须保留式 (26a) 中的功率因子。门限是设计参数，需要结合评估选取，不能由 $\eta_b=\gamma_kN_k$ 自动获得真实 INR 保证，其中 $\gamma_k$ 是 UE $k$ 的线性 INR 门限、$N_k$ 是其接收噪声功率。若要声称实际部署中的 INR 硬保证，还需 NTN 侧反馈或足够的有效信道/增益、噪声与误差界信息，并据此建立可验证的约束。
+
+**式 (26b) 是扩展联合设计时的建模示例，不是当前代码已实现的求解问题。** 当前实验固定发射功率，求解的是式 (25) 的信号增益与泄漏惩罚折中；给定 $\lambda$ 的特征向量解既不自动满足任意预设的 $\eta_b$，也不是式 (26b) 的联合最优解。
+
 ### 8. 用完整相干 DL 信道评估，而不是用惩罚值替代 INR
 
 恢复 sector 下标 $b$，设各 BS 发射流独立、每流功率为 $P_b$。对 NTN UE $k$，当前接收天线功率求和的干扰模型为
@@ -336,6 +379,8 @@ I_k=\sum_bP_b\sum_r\left|v_b^H\mathbf h_{bkr}(f_{\mathrm D})\right|^2
 $$
 
 同一发射流的路径先相干相加，不同 BS 流之间再加功率。$N_{\mathrm{NTN}}$ 是实验配置的 INR 噪声功率，代码对多接收天线使用上述功率求和而不另做 NTN 合并器优化。当前 $P_b$ 使用共同的 `tx_power`。
+
+式 (27) 使用仿真器掌握的完整 DL 有效信道，其中已经包含 NTN UE 接收天线的方向响应；不应再额外乘一次接收天线增益。接收链路功率与到达方向增益的关系可参见 [MathWorks 射线追踪链路功率说明](https://www.mathworks.com/help/comm/ug/ray-tracing-for-wireless-communications.html)。这里的真实 INR 是**仿真评估量**；完整 NTN DL 信道和 $N_{\mathrm{NTN}}$ 不作为 UL 感知波束设计器已知的信息，也不用于声称式 (26b) 保证了逐 UE INR 门限。
 
 对由 sector $b$ 服务的 TN 用户 $j$，使用其固定接收合并器 $w_j$：
 
