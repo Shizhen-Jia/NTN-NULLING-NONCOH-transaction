@@ -3,6 +3,7 @@ from dataclasses import asdict, replace
 import numpy as np
 from scipy.stats import beta
 from .dynamic import ModelConfig, JointModel
+from .stress import observation_diagnostics, run_repeated_observation, run_random_arrival
 from .reporting import output_dir, rows_csv, json_file, save_figure, ecdf, latex_table, plt
 
 
@@ -21,6 +22,7 @@ def summarize(model, result, episodes, label, tuning=None):
         row.update({f'predicted_{key}': value for key, value in result.costs.items()})
     if episodes:
         row['episodes'] = len(episodes)
+        row.update(observation_diagnostics(episodes))
         for key in ['total_bits_per_hz', 'dl_bits_per_hz', 'ul_bits_per_hz']:
             x = np.array([e[key] for e in episodes])
             row[f'empirical_{key}'] = float(x.mean())
@@ -176,7 +178,7 @@ def run_e7(path,seed=20260921,quick=True,gamma_db=(-15,-10,-5,0),config=None):
     fig.colorbar(im,ax=ax,label='Expected bits/Hz')
     save_figure(fig,path/'tn_demand_feasibility')
     summary=dict(experiment='E7',scope='declared synthetic finite hidden-Markov model',config=asdict(config),
-                 gamma_db=list(gamma_db),episodes=n,units='bits/Hz per tick; multiply by B and tick seconds for bits',
+                 gamma_db=list(gamma_db),episodes=n,units='cumulative normalized bits/Hz per episode; multiply by B and tick seconds for bits',
                  fixed_tn='thetaDL/thetaUL/deltaTN/deadlines/reference fixed across main Gamma scan',
                  ci='TN Clopper-Pearson; NTN episode bootstrap plus Hoeffding upper bound',
                  optimality='Exact declared finite model only',infeasible=sum(r['status']!='optimal' for r in rows))
@@ -210,6 +212,10 @@ def run_e8(path,seed=20260921,quick=True,config=None):
         row=summarize(model,result,ep,label,tune)
         row['scope']=scope
         row['bound_valid_for_this_scenario']=scope.startswith('within')
+        if label == 'bursty_same_marginals':
+            row['diagnostic_note'] = ('Repeated observations executed; see correlation diagnostics'
+                if row.get('temporal_correlation_stress_effective') else
+                'No repeated listening executed; this policy does not test temporal observation correlation')
         rows.append(row)
         rows_csv(path/f'{label}_episodes.csv',ep)
         rows_csv(path/f'{label}_timeline.csv',trace)
@@ -242,7 +248,13 @@ def run_e8(path,seed=20260921,quick=True,config=None):
                 [[short_names[index],'yes' if r['bound_valid_for_this_scenario'] else 'no',r['status'],f"{r['empirical_total_bits_per_hz']:.3f}" if r['status']=='optimal' else '--',
                   f"{r['outage_0']:.4f}" if r['status']=='optimal' else '--',f"{r['outage_1']:.4f}" if r['status']=='optimal' else '--'] for index,r in enumerate(rows)],
                 'Finite-model failure scenarios; deliberate model violations have no guarantee.')
+    repeated = run_repeated_observation(path/'repeated_observation', episodes=n, seed=seed, config=config)
+    arrival = run_random_arrival(path/'random_arrival', episodes=n, seed=seed, config=config)
     summary=dict(experiment='E8',scope='synthetic; each scenario labels model validity',
-                 config=asdict(config),episodes=n,cases=len(cases))
+                 config=asdict(config),episodes=n,cases=len(cases),
+                 diagnostics=dict(
+                     repeated_observation=dict(path='repeated_observation', scope=repeated['scope'],
+                         independent_model_budget_feasible=repeated['policy_budget_feasible_in_independent_model']),
+                     random_arrival=dict(path='random_arrival', scope=arrival['scope'], cases=len(arrival['cases']))))
     json_file(path/'summary.json',summary)
     return summary

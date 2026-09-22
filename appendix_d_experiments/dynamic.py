@@ -255,6 +255,13 @@ class JointModel:
         """Common random streams across policies; physical states never used by policy."""
         if not result.feasible:
             return [], [], []
+        return self.simulate_policy(result.policy, episodes=episodes, seed=seed,
+                                    physical_gain=physical_gain, background_gain=background_gain,
+                                    burst_success=burst_success)
+
+    def simulate_policy(self, policy, episodes=1000, seed=7001, physical_gain=1.0,
+                        background_gain=1.0, burst_success=False):
+        """Execute a causal policy without claiming TN/NTN budget feasibility."""
         c = self.config
         rng = np.random.default_rng(seed)
         episode_rows, samples, trace = [], [], []
@@ -271,9 +278,9 @@ class JointModel:
             action_u = rng.random(c.epochs)
             sid, totals = 's', {'dl': 0.0, 'ul': 0.0}
             counts = [0, 0]
-            row = dict(episode=ep)
+            row = dict(episode=ep, sensing_count=0)
             for k in range(c.epochs):
-                distribution = result.policy[sid]
+                distribution = policy[sid]
                 names = list(distribution)
                 cumulative = np.cumsum([distribution[n] for n in names])
                 name = names[min(int(np.searchsorted(cumulative, action_u[k], side='right')), len(names)-1)]
@@ -285,6 +292,9 @@ class JointModel:
                     outcome = f'accept{latent[k*c.block+1]}' if u < a else ('reject' if u < a+r else 'no_detection')
                 else:
                     outcome = 'none'
+                row['sensing_count'] += int(duration > 0)
+                row[f'observation_outcome_{k}'] = outcome
+                row[f'observation_accepted_{k}'] = int(outcome.startswith('accept')) if duration else None
                 nid, steps = self.branch_info[(sid, name, outcome)]
                 for st in steps:
                     t, v = st['t'], st['v']

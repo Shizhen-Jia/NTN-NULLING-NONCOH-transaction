@@ -71,24 +71,44 @@ def _latex(path, headers, rows):
     Path(path).write_text("\n".join(lines))
 
 
-def run_e4(output_dir, seed=4104, quick=True):
+def _e4_calibration_plan(quick, alpha):
+    """Keep the coverage target independent of the computational profile."""
+    try:
+        alpha = float(alpha)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("E4 alpha must be a finite number in (0, 1).") from exc
+    if not np.isfinite(alpha) or not 0 < alpha < 1:
+        raise ValueError("E4 alpha must be a finite number in (0, 1).")
+    ntrain, ncal, ntest = (32, 64, 128) if quick else (128, 256, 1024)
+    order = int(np.ceil((ncal + 1) * (1 - alpha)))
+    if order > ncal:
+        raise ValueError(
+            f"E4 alpha={alpha:g} needs more than {ncal} calibration scenes "
+            "for a finite calibrated radius; choose a larger sample profile "
+            "or explicitly increase alpha."
+        )
+    return ntrain, ncal, ntest, alpha, order
+
+
+def run_e4(output_dir, seed=4104, quick=True, alpha=0.10):
     """Whole-scene split calibration of complete coherent synthetic channels.
 
     Four observable/model cases are retained: strong and weak accepted records,
     missed UL, and UL-silent/DL-active background. Independent entire scenes
     form train/calibration/test splits. Test labels are evaluator-only.
+    alpha is the scene-marginal miscoverage target; quick/full changes only
+    sample counts, never this target. Set alpha=0.05 explicitly for 95% coverage.
     """
+    ntrain, ncal, ntest, alpha, order = _e4_calibration_plan(quick, alpha)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
-    ntrain, ncal, ntest = (32, 64, 128) if quick else (128, 256, 1024)
     nscene = ntrain + ncal + ntest
     m, rank, coefficient_bound = 8, 3, 1.2
     ages = np.asarray([0., 1., 2., 4.])
     durations = np.asarray([1., 2., 4.])
     groups = ["accepted_strong", "accepted_weak", "missed_UL",
               "UL_silent_DL_active"]
-    alpha = 0.1 if quick else 0.05
     # All f are already sqrt(chi*Pmax/N)-normalized complete DL channels.
     # A has orthonormal columns, so ||A c|| <= C.
     known_rho = np.zeros((4, len(durations), len(ages)))
@@ -132,9 +152,6 @@ def run_e4(output_dir, seed=4104, quick=True):
     # contributes one maximum score across ALL quality/duration/age strata.
     trained_shape = np.maximum(np.quantile(required_radius[train], .8, axis=0), 1e-8)
     scores = np.max(required_radius[cal] / trained_shape, axis=(1, 2, 3))
-    order = int(np.ceil((ncal+1)*(1-alpha)))
-    if order > ncal:
-        raise ValueError("Not enough calibration scenes for the requested alpha.")
     scale = float(np.sort(scores)[order-1])
     calibrated_rho = scale * trained_shape
     test_radii = required_radius[test]
@@ -221,7 +238,7 @@ def run_e4(output_dir, seed=4104, quick=True):
         scene_split=np.asarray(["train"]*ntrain+["calibration"]*ncal+["test"]*ntest),
         coefficient_bound=coefficient_bound, known_rho=known_rho,
         calibrated_rho=calibrated_rho, calibration_scores=scores,
-        calibration_order=order)
+        calibration_order=order, calibration_alpha=alpha)
     _latex(out / "scene_coverage.tex",
            ["Envelope", "Scenes", "Failure", "95% CI"],
            [[r["method"], r["independent_test_scenes"],
@@ -270,9 +287,11 @@ def run_e4(output_dir, seed=4104, quick=True):
     plt.close(fig)
     model = dict(
         experiment="E4", data_source="declared_synthetic_complete_channel_model",
-        seed=int(seed), quick=bool(quick), m=m, rank=rank,
+        seed=int(seed), quick=bool(quick), profile="quick" if quick else "full",
+        m=m, rank=rank,
         coefficient_bound=coefficient_bound, ntrain=ntrain, ncal=ncal, ntest=ntest,
         calibration_alpha=alpha, calibration_order=order, calibration_scale=scale,
+        calibration_target_coverage=1-alpha,
         calibration_unit="independent whole scene; maximum over all modeled strata",
         empirical_guarantee="exchangeable-scene marginal simultaneous coverage only",
         conditional_risk_certified=False,
@@ -298,6 +317,7 @@ def run_e4(output_dir, seed=4104, quick=True):
         "uses a declared toy observation kernel, not a GLRT calibration.\n")
     return dict(output_dir=str(out), manifest=str(out / "manifest.json"),
                 scene_coverage=scene_rows, calibration_scale=scale,
+                calibration_alpha=alpha, calibration_order=order,
                 known_rho=known_rho, calibrated_rho=calibrated_rho,
                 ages=ages, durations=durations)
 
