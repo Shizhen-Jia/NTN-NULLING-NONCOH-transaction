@@ -1,0 +1,19 @@
+{
+  "paper": "overleaf_ntn_paper/direction.tex",
+  "run": "result/appendix_d_20260921_235448_775259",
+  "slides": 30,
+  "main_slides": 25,
+  "backup_slides": 5,
+  "sha256": {
+    "overleaf_ntn_paper/direction.tex": "9ca821edc548a3f3085e29f96b4c27d040b9c8dfa8337b88ae9f961f660c3fb6",
+    "result/appendix_d_20260921_235448_775259/manifest.json": "295cb5882be4cc058a325a20746d0893e63e84874a3a1f53e5df041f9f4bba4e",
+    "result/appendix_d_20260921_235448_775259/E7/strategy_summary.csv": "f54b6329a2a81c690b62d25b677d79aebed41d424cc7532ed0a49e0685af0932",
+    "result/appendix_d_20260921_235448_775259/E6/E6_validation.csv": "e2a7fd5587d3fcf94dd9795d7b5ff0822a0a58ab4cd26bad227bc0be9e6d23af",
+    "result/appendix_d_20260921_235448_775259/E4/scene_coverage.csv": "4f24decec57f9b73b051f45e8bf8d25ca5f5927fd0f07d7abb554749abb96540",
+    "result/appendix_d_20260921_235448_775259/fresh_rt_spatial/gamma_summary.csv": "9bbedfa712ef404706bd16e35be080af3f20822a19fc64576e5d40eb68c72ce1",
+    "result/appendix_d_20260921_235448_775259/E8/random_arrival/summary.json": "b41b365b812d7e6edf34735fdb98c88dd9932348714b275517a5f938a36d52d3",
+    "result/appendix_d_20260921_235448_775259/E8/repeated_observation/summary.json": "b447d709950c01396e84cd8115930e5470ffed03749c3c5c6e8f79bee66aabe2"
+  },
+  "diagram_scope": "timing, architecture and uncertainty diagrams are conceptual; charts use the pinned result files",
+  "layout_warnings": []
+}
