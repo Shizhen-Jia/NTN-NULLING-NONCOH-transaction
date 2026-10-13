@@ -104,14 +104,15 @@ class SectorDropTests(unittest.TestCase):
         h[0,0,11,0]=np.nan
         self.assertFalse(channel_dominance(h,[0],0.,0.)[0][0])
 
-    def test_copied_notebook_configuration_and_syntax(self):
+    def test_main_notebook_configuration_and_syntax(self):
         nb=json.loads(Path("Nulling_CDF_SectorDrop.ipynb").read_text())
         source=""
         for i,cell in enumerate(nb["cells"]):
             if cell["cell_type"]=="code":
                 text="".join(cell["source"]); ast.parse(text)
                 source+=text
-                self.assertEqual(cell["outputs"],[])
+                # run_sector_drop.py intentionally preserves executed outputs.
+                # Validate source configuration without requiring cleared results.
         self.assertIn("SceneConfigSionnaSectorDrop",source)
         self.assertIn("from SceneConfigSionnaSectorDrop import SceneConfigSionna\n",source)
         self.assertIn("tn_rx = 12",source)
