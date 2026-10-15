@@ -61,13 +61,22 @@ def run_snapshot(config, *, positions_kwargs, paths_kwargs, music_kwargs,
     azimuth = float(sat_rng.uniform(*satellite_azimuth_range))
     elevation = float(sat_rng.uniform(*satellite_elevation_range))
     placement = dict(positions_kwargs, azimuth=azimuth, elevation=elevation)
-    random_state = np.random.get_state()
-    try:
-        # Same seed derivation as macro 0 of run_nulling_cdf_experiment.
-        np.random.seed(np.random.SeedSequence([int(position_seed), 0]).generate_state(1)[0])
+    if position_seed is None:
         config.compute_positions(**placement)
-    finally:
-        np.random.set_state(random_state)
+    else:
+        random_state = np.random.get_state()
+        try:
+            # Same seed derivation as macro 0 of run_nulling_cdf_experiment.
+            np.random.seed(np.random.SeedSequence([int(position_seed), 0]).generate_state(1)[0])
+            config.compute_positions(**placement)
+        finally:
+            np.random.set_state(random_state)
+    # Native Sionna requires an integer; share one fresh seed across TN/DL/UL paths.
+    paths_kwargs = dict(paths_kwargs)
+    propagation = paths_kwargs.get("propagation_options")
+    if propagation is not None and propagation.get("seed", 42) is None:
+        paths_kwargs["propagation_options"] = dict(
+            propagation, seed=int(np.random.SeedSequence().generate_state(1)[0]))
     print("Tracing one SectorDrop scene (including its normal TN acceptance retries)...", flush=True)
     config.compute_paths(**paths_kwargs)
     h_tn = mps.collapse_cir_to_narrowband(config.a_tn)
@@ -132,6 +141,7 @@ def run_snapshot(config, *, positions_kwargs, paths_kwargs, music_kwargs,
         ntn_deployed=len(h_dl), ntn_detected=len(detected_idx), tn_scheduled=len(h_tn),
         lambda_value=lambda_value, ul_frequency_hz=frequency_ul, dl_frequency_hz=frequency_dl,
         satellite_angles_deg=[azimuth, elevation], source_count_method="rank",
+        path_solver_seed=(paths_kwargs.get("propagation_options") or {}).get("seed", 42),
         num_sources_by_sector=detected["num_sources_record"],
         accepted_peaks_by_sector=detected["accepted_peak_counts"], path_matching=path_metrics,
         detected_median_inr_before_db=(float(np.median(before_db[detected_idx])) if len(detected_idx) else None),
