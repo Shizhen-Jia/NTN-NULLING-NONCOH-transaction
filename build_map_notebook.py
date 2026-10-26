@@ -114,7 +114,8 @@ def main() -> None:
             dedent(
                 """
                 # ---- Shared configuration (mirrors Nulling_CDF.ipynb, but runs one snapshot only) ----
-                scene_path = Path("Denver_scene/10kmwithfigure/10km.xml")
+                # scene_path = Path("Denver_scene/10kmwithfigure/10km.xml")
+                scene_path = Path("Denver_scene/10kmwithfigure/scenes/flat/scene.xml")
                 result_dir = Path("result") / "map_snapshot"
                 result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -827,7 +828,8 @@ def main() -> None:
                     cell_size=(20, 20),
                     max_depth=2,
                     samples_per_tx=2**13,
-                    use_terrain=True,
+                    # use_terrain=True,
+                    use_terrain=False,
                     terrain_name="terrain",
                     terrain_z_offset=2.5,
                     fallback_center=None,
@@ -1013,11 +1015,14 @@ def main() -> None:
                 radiomap_terrain_name = "terrain"
                 radiomap_terrain_z_offset = 2.5
 
-                fallback_center = [0.0, 0.0, 1.5]
-                fallback_size = [
-                    float(SceneConfig.extent[1] - SceneConfig.extent[0]),
-                    float(SceneConfig.extent[3] - SceneConfig.extent[2]),
-                ]
+                # fallback_center = [0.0, 0.0, 1.5]
+                # fallback_size = [
+                #     float(SceneConfig.extent[1] - SceneConfig.extent[0]),
+                #     float(SceneConfig.extent[3] - SceneConfig.extent[2]),
+                # ]
+                # Planar measurement surface: original ground XY extent, same height above ground.
+                fallback_center = [-3.292236328125, 3.007080078125, 2.5]
+                fallback_size = [10044.43798828125, 10082.26025390625]
 
                 radiomap_specs = []
                 if run_radiomap_no_nulling:
@@ -1069,7 +1074,8 @@ def main() -> None:
                         cell_size=radiomap_cell_size,
                         max_depth=radiomap_max_depth,
                         samples_per_tx=radiomap_samples_per_tx,
-                        use_terrain=True,
+                        # use_terrain=True,
+                        use_terrain=False,
                         terrain_name=radiomap_terrain_name,
                         terrain_z_offset=radiomap_terrain_z_offset,
                         fallback_center=fallback_center,

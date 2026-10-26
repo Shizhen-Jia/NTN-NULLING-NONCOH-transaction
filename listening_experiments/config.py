@@ -13,7 +13,8 @@ def noise_watts(bandwidth, noise_figure):
 
 @dataclass(frozen=True)
 class RTConfig:
-    scene_path: str = "Denver_scene/10kmwithfigure/10km.xml"
+    # scene_path: str = "Denver_scene/10kmwithfigure/10km.xml"
+    scene_path: str = "Denver_scene/10kmwithfigure/scenes/flat/scene.xml"
     ntn_users: int = 20
     tx_rows: int = 8
     tx_cols: int = 8

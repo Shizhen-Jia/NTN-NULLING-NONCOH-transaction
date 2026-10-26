@@ -1,7 +1,7 @@
 """Single-scene rank-MUSIC maps using the SectorDrop experiment's public pipeline.
 
 Plotting helpers do not select victims or change beams. Terminal CDFs use actual
-VSAT channels. Sionna terrain radio maps show spatially averaged power with an
+VSAT channels. Sionna radio maps show spatially averaged power with an
 isotropic receiver, as in map.ipynb. Radio-map code lives in map2.ipynb so it
 can be edited interactively. Truth matching only labels plot markers.
 """
@@ -99,11 +99,11 @@ def run_snapshot(config, *, positions_kwargs, paths_kwargs, music_kwargs,
         h_ul = h_dl
     else:
         sensing_paths, sensing_cir, sensing_tau = config.compute_ntn_ul_paths(
-            frequency_ul, max_depth=paths_kwargs["max_depth"])
+            frequency_ul, max_depth=config.ntn_solver_options["max_depth"])
         h_ul = mps.collapse_cir_to_narrowband(sensing_cir)
     kw = dict(music_kwargs, array_positions_local=array_dl * (frequency_ul / frequency_dl),
               tx_orientations_rad=orientations, covariance_refine=False)
-    print("Estimating anonymous multipath directions with rank-MUSIC...", flush=True)
+    print("Estimating anonymous NTN path directions with rank-MUSIC...", flush=True)
     detected = mps.run_multipath_music_pipeline(h_ul, music_kwargs=kw, **multipath_kwargs)
     # Exactly the main notebook's path matching: used only to label detected UEs.
     catalog_ul = mps.build_path_catalog(sensing_paths, sensing_cir, sensing_tau)

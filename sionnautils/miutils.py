@@ -256,6 +256,8 @@ class CoverageMapPlanner(object):
         """Compute z-min/z-max/bldg_mask/in-region over grid.
 
         batch_size: number of rays per chunk. Use to limit GPU memory.
+        Named Ground_Flat_* slabs use their upper surface as ground height;
+        upward rays otherwise hit the underside of a thick ground slab.
         """
         xvec = self.xgrid.flatten().astype(np.float32)
         yvec = self.ygrid.flatten().astype(np.float32)
@@ -295,6 +297,17 @@ class CoverageMapPlanner(object):
         # ---------- ZMIN (trace from below)
         z_below = self.scene.bbox().min.z - 1
         zmin = trace_z(z_below, 1.0)
+        for shape in self.scene.shapes():
+            # Explicit convention used by the flat Blender scene packages.
+            # Existing terrain scenes retain the original ray-based heights.
+            if not shape.id().removeprefix("mesh-").startswith("Ground_Flat_"):
+                continue
+            ground_box = shape.bbox()
+            on_ground = (
+                (xvec >= ground_box.min.x) & (xvec <= ground_box.max.x)
+                & (yvec >= ground_box.min.y) & (yvec <= ground_box.max.y)
+            )
+            zmin[on_ground] = float(ground_box.max.z)
         self.zmin_grid = zmin.reshape(self.xgrid.shape)
 
         # ---------- ZMAX (trace from above)

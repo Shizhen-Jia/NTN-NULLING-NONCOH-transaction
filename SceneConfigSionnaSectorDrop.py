@@ -438,17 +438,19 @@ class SceneConfigSionna:
                       sector_yaw_offset_rad=None,
                       sector_pitch_rad=None,
                       sector_roll_rad=None,
-                      ntn_los_mode="natural", propagation_options=None):
+                      ntn_los_mode="natural", propagation_options=None, ntn_max_depth=None):
         """
         1) Configure scene frequency and remove old TX/RX
         2) Add TX, add TN array and receivers => compute TN CIR
         3) Remove TN, switch RX array to single-element custom => compute NTN CIR
+        ntn_max_depth:
+            Override the NTN DL/reciprocal UL depth only; None uses max_depth.
         sector_*_rad:
             If None, use current object defaults:
             self.tx_sector_yaw_offset_rad / self.tx_sector_pitch_rad / self.tx_sector_roll_rad.
         """
         self.tn_solver_options, self.ntn_solver_options = resolve_propagation_options(
-            max_depth, ntn_los_mode, propagation_options)
+            max_depth, ntn_los_mode, propagation_options, ntn_max_depth=ntn_max_depth)
         max_depth = self.tn_solver_options["max_depth"]
         if sector_yaw_offset_rad is None:
             sector_yaw_offset_rad = self.tx_sector_yaw_offset_rad

@@ -89,9 +89,11 @@ def validate_max_depth(max_depth):
     return int(max_depth)
 
 
-def resolve_propagation_options(max_depth, ntn_los_mode="natural", options=None):
-    """Pass the configured depth to TN DL, NTN DL and reciprocal NTN UL."""
+def resolve_propagation_options(max_depth, ntn_los_mode="natural", options=None, *,
+                                ntn_max_depth=None):
+    """Configure TN depth and an optional separate NTN DL/reciprocal UL depth."""
     max_depth = validate_max_depth(max_depth)
+    ntn_max_depth = max_depth if ntn_max_depth is None else validate_max_depth(ntn_max_depth)
     if ntn_los_mode not in ("natural", "nlos_only"):
         raise ValueError("ntn_los_mode must be 'natural' or 'nlos_only'.")
     base = dict(los=True, specular_reflection=True, diffuse_reflection=False,
@@ -107,6 +109,7 @@ def resolve_propagation_options(max_depth, ntn_los_mode="natural", options=None)
             raise ValueError(f"{name} must be a positive integer.")
     base.update(options)
     ntn = dict(base)
+    ntn["max_depth"] = ntn_max_depth
     ntn["los"] = ntn_los_mode == "natural"
     return base, ntn
 

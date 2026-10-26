@@ -34,9 +34,11 @@ Gain-estimation accuracy against true g remains available. The separate
 These are the explicit notebook settings. They can differ from the default
 arguments of the underlying Python functions.
 
+<!-- Previous scene: Denver_scene/10kmwithfigure/10km.xml (terrain, retained on disk). -->
+
 | Setting | Current value | Meaning |
 | --- | --- | --- |
-| Scene | `Denver_scene/10kmwithfigure/10km.xml` | Sionna scene |
+| Scene | `Denver_scene/10kmwithfigure/scenes/flat/scene.xml` | Flat ground, 1 m slab; original terrain path retained as a code comment |
 | Deployment | 4 BS sites, 3 sectors per site | 12 independently processed sector arrays |
 | Receivers | 20 NTN, 200 TN | Current Monte Carlo deployment |
 | TX array | 8 x 8 | 64 array elements per sector |
