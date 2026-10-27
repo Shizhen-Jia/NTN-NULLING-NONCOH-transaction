@@ -65,6 +65,13 @@ def save_run_metadata(result_dir, config):
             shutil.copy2(source, sources / name)
             manifest[name] = dict(sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
                                   size_bytes=source.stat().st_size)
+    font_dir = config.get("paper_figure", {}).get("font_dir")
+    if font_dir:
+        (sources / "fonts").mkdir(exist_ok=True)
+        for source in sorted(Path(font_dir).glob("*.TTF")):
+            shutil.copy2(source, sources / "fonts" / source.name)
+            manifest[str(source)] = dict(sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                                         size_bytes=source.stat().st_size, copied=True)
     scene = Path(config.get("scene_path", ""))
     if scene.is_file():
         manifest[str(scene)] = dict(sha256=hashlib.sha256(scene.read_bytes()).hexdigest(),
@@ -108,6 +115,8 @@ def save_summary(result_dir, experiment):
     for percentage, case in experiment["by_percentage"].items():
         for metric in ("inr", "snr", "sinr"):
             groups = [("no_nulling", "", case[f"raw_{metric}_db"])]
+            if metric == "inr" and "raw_undetected_inr_db" in case:
+                groups.append(("undetected_no_nulling", "", case["raw_undetected_inr_db"]))
             for prefix in ("est", "music_real"):
                 groups.extend((prefix, float(lam), values)
                               for lam, values in case.get(f"{prefix}_{metric}_db", {}).items())
@@ -127,6 +136,16 @@ def save_summary(result_dir, experiment):
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    # UE identity is local to a macro. Retain macro/round IDs for reproducible
+    # verification against the RT channel cache, including every UL offset.
+    with (Path(result_dir) / "undetected_inr_samples.csv").open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["ul_percentage", "ul_frequency_hz", "sim_idx", "round_idx",
+                         "ntn_ue_idx", "raw_inr_db"])
+        for percentage, case in experiment["by_percentage"].items():
+            for ids, value in zip(case.get("undetected_inr_sample_ids", []),
+                                  case.get("raw_undetected_inr_db", [])):
+                writer.writerow([percentage, case["ul_frequency_hz"], *ids, value])
 
 
 def write_artifact_manifest(result_dir):

@@ -52,6 +52,50 @@ class ToyScene:
 
 
 class FddTests(unittest.TestCase):
+    def test_undetected_round_excludes_zero_power_but_keeps_zero_db_and_weak_links(self):
+        h_tn = np.zeros((2, 1, 2, 2), complex)
+        h_tn[0, 0, 0, 0] = h_tn[1, 0, 1, 0] = 1
+        h_ntn = np.zeros((6, 1, 2, 2), complex)
+        h_ntn[0, 0, 0, 0] = 1  # Detected at BS 0.
+        h_ntn[1, 0, 1, 0] = 1  # Missed, link only to BS 1; INR = 0 dB.
+        # UE 2 has no RT link.
+        h_ntn[3, 0, 0, 1] = 1  # Linked but exactly zero received beam power.
+        h_ntn[4, 0, 1, 0] = 1e-15  # Weak positive INR must not be thresholded away.
+        h_ntn[5, 0, 1, 0] = 1  # Detected only at BS 1.
+        pairing = ncu.pair_tn_to_strongest_tx(
+            h_tn, h_tn_th=0., tx_antennas=2, tx_power=1., snr_noise_power=1.)
+        kwargs = dict(pairs_by_tx=pairing['pairs_by_tx'], music_lookup={}, round_idx=0,
+                      tx_power=1., snr_noise_power=1., inr_noise_power=1.)
+        out = ncu.run_small_round(h_tn, h_ntn, detected_rx_indices=[0, 5], **kwargs)
+        np.testing.assert_array_equal(out['undetected_inr_rx_indices'], [1, 4])
+        np.testing.assert_allclose(out['raw_undetected_inr_db'], [0., -300.])
+        np.testing.assert_array_equal(np.flatnonzero(out['detected_mask']), [0, 5])
+        all_detected = ncu.run_small_round(h_tn, h_ntn, detected_rx_indices=range(6), **kwargs)
+        self.assertEqual(all_detected['raw_undetected_inr_db'].size, 0)
+
+    def test_undetected_macro_aggregation_and_archive(self):
+        original = ncu.run_music_standard_pipeline
+        def missed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            result['detected_rx_indices_unique'] = np.empty(0, int)
+            return result
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(ncu, 'run_music_standard_pipeline', side_effect=missed):
+            _, sweep = self.run_toy([-10, 0, 10])
+            path = ncu.save_experiment_metrics(sweep, result_dir=tmp)
+            with np.load(path, allow_pickle=False) as saved:
+                for i, case in enumerate(sweep['by_percentage'].values()):
+                    np.testing.assert_allclose(case['raw_undetected_inr_db'], case['raw_inr_db'])
+                    np.testing.assert_array_equal(case['undetected_inr_sample_ids'], [[0, 0, 0], [1, 0, 0]])
+                    np.testing.assert_array_equal(saved[f'ul_{i:03d}/raw_undetected_inr_db'],
+                                                  case['raw_undetected_inr_db'])
+                    self.assertEqual(case['macro_stats'][0]['undetected_linked_ntn_count'], 1)
+            import sector_drop_reporting as reporting
+            reporting.save_summary(tmp, sweep)
+            import csv
+            with (Path(tmp) / 'undetected_inr_samples.csv').open() as stream:
+                self.assertEqual(len(list(csv.DictReader(stream))), 6)
+
     def run_toy(self, percentages=None, mode="angle", directory=None, power_correction=None, lambda_values=None):
         scene = ToyScene()
         music = dict(
@@ -247,10 +291,14 @@ class FddTests(unittest.TestCase):
         _, sweep = self.run_toy([-5, 0, 5])
         with tempfile.TemporaryDirectory() as tmp, patch.object(plt, 'show'):
             scope = dict(np=np, plt=plt, nulling_cdf_results=sweep,
-                         results_by_percentage=sweep['by_percentage'], result_dir=Path(tmp), plot_oracle=False)
+                         results_by_percentage=sweep['by_percentage'], result_dir=Path(tmp), plot_oracle=False,
+                         undetected_reference_ul_percentage=0.)
             exec(''.join(nb['cells'][5]['source']), scope)
-            self.assertEqual(len(scope['inr_ax'].lines), 1+6)
-            self.assertEqual(len(set(line.get_label() for line in scope['inr_ax'].lines)), 7)
+            self.assertEqual(len(scope['inr_ax'].lines), 2+6)
+            self.assertEqual(len(set(line.get_label() for line in scope['inr_ax'].lines)), 8)
+            np.testing.assert_array_equal(scope['inr_ax'].lines[1].get_xdata(),
+                                          np.sort(sweep['by_percentage'][0]['raw_undetected_inr_db']))
+            self.assertTrue((Path(tmp)/'undetected_inr_cdf.csv').exists())
             self.assertTrue((Path(tmp)/'nulling_inr_cdf.pdf').exists())
             plt.close('all')
 

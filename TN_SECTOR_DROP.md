@@ -147,7 +147,7 @@ biased indoor/outdoor composition even though type draws were initially correct.
 
 ## Outputs
 
-New runs use `result/YYYYMMDD_HHMMSS_microseconds/`, leaving old experiments intact.
+New runs use `result/CDF/YYYYMMDD_HHMMSS_microseconds/`, leaving old experiments intact.
 See [FDD_MULTIPATH_ANALYSIS.md](FDD_MULTIPATH_ANALYSIS.md#run-archive-and-plotting)
 for the full archive contents, compact legends, and command-line runner.
 
@@ -209,4 +209,12 @@ diagnostics, frequency-transfer analysis and run archive details have moved to
 [FDD_MULTIPATH_ANALYSIS.md](FDD_MULTIPATH_ANALYSIS.md).
 
 The current notebook uses 20 macro realizations and UL offsets
-`[-20, -10, -5, 0, 5, 10, 20]%` around a fixed 7 GHz DL carrier.
+`[-20, -10, 0, 10, 20]%` around a fixed 8 GHz DL carrier, with
+lambda values `[1e13, 1e14]`. The INR figure also includes one pre-nulling
+curve for UEs undetected at the co-frequency UL reference. This subset must
+have a nonzero RT channel to at least one sector and positive linear INR;
+zero-power samples are excluded before conversion to dB.
+Figures use Times New Roman on 3.5 x 2.15 inch pages, with legends inside
+the axes and no title. The co-frequency curves are solid; the undetected
+pre-nulling reference is solid gray. Random seeds are recorded in the run
+configuration so each newly seeded batch remains reproducible.

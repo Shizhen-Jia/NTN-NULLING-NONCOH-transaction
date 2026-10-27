@@ -1034,6 +1034,7 @@ def run_small_round(
     max_detected_b_terms: str | int | None = "all",
     print_music_u_corr: bool = False,
     oracle_path_channels: np.ndarray | None = None,
+    detected_rx_indices: Iterable[int] | None = None,
     eps: float = 1e-12,
 ) -> Dict[str, Any]:
     """Run one small round with true, MUSIC, and oracle comparison modes."""
@@ -1069,6 +1070,13 @@ def run_small_round(
     }
     interfered_rx_mask = np.any(np.abs(h_ntn) > eps, axis=(1, 2, 3))
     detected_rx_mask = np.zeros((num_ntn_rx,), dtype=bool)
+    # Truth-matched UE IDs are evaluation diagnostics only. In multipath mode
+    # the anonymous peak lookup does not contain per-TX UE identities.
+    if detected_rx_indices is not None:
+        detected_indices = np.asarray(list(detected_rx_indices), dtype=int)
+        if np.any((detected_indices < 0) | (detected_indices >= num_ntn_rx)):
+            raise ValueError("detected_rx_indices contains an invalid NTN UE index.")
+        detected_rx_mask[detected_indices] = True
     eval_mask = np.asarray(interfered_rx_mask, dtype=bool).copy()
     round_pairs: Dict[int, Dict[str, Any]] = {}
     raw_beams: Dict[int, np.ndarray] = {}
@@ -1104,7 +1112,7 @@ def run_small_round(
         h_ntn_tx = np.asarray(h_ntn[:, :, tx_idx, :], dtype=np.complex128)
         lookup = music_lookup.get(int(tx_idx), {})
         rx_detected_t = np.asarray(lookup.get("rx_detected", np.empty((0,), dtype=int)), dtype=int)
-        if rx_detected_t.size > 0:
+        if detected_rx_indices is None and rx_detected_t.size > 0:
             detected_rx_mask[rx_detected_t] = True
 
         est_inputs = _extract_tx_music_terms(
@@ -1235,6 +1243,15 @@ def run_small_round(
             music_real_sinr_db[lambda_].append(float(_safe_db(music_real_sinr_linear, eps=eps)))
 
     inr_eval_mask = np.asarray(interfered_rx_mask, dtype=bool)
+    # Keep arbitrarily weak, nonzero RT links. Test linear power before taking
+    # logs: 0 dB is INR=1 and must not be mistaken for a zero-power sample.
+    linked_rx_mask = np.any(np.abs(h_ntn) > 0, axis=(1, 2, 3))
+    raw_inr_linear = raw_inr_power * float(tx_power) / float(inr_noise_power)
+    undetected_inr_mask = (
+        linked_rx_mask & ~detected_rx_mask
+        & np.isfinite(raw_inr_linear) & (raw_inr_linear > 0)
+    )
+    raw_undetected_inr_db = 10.0 * np.log10(raw_inr_linear[undetected_inr_mask])
     raw_inr_db = (
         _safe_db(raw_inr_power[inr_eval_mask] * float(tx_power) / float(inr_noise_power), eps=eps)
         if np.any(inr_eval_mask)
@@ -1292,6 +1309,8 @@ def run_small_round(
             lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in music_real_sinr_db.items()
         },
         "raw_inr_db": np.asarray(raw_inr_db, dtype=np.float64),
+        "raw_undetected_inr_db": raw_undetected_inr_db,
+        "undetected_inr_rx_indices": np.flatnonzero(undetected_inr_mask),
         "true_inr_db": {lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in true_inr_db.items()},
         "est_inr_db": {lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in est_inr_db.items()},
         "music_real_inr_db": {
@@ -1479,6 +1498,8 @@ def run_nulling_cdf_experiment(
         raw_snr_all: List[float] = []
         raw_sinr_all: List[float] = []
         raw_inr_all: List[float] = []
+        raw_undetected_inr_all: List[float] = []
+        undetected_inr_sample_ids: List[Tuple[int, int, int]] = []
         true_snr_all: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list}
         true_sinr_all: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list}
         est_snr_all: Dict[float, List[float]] = {lambda_: [] for lambda_ in lambda_list_music_est}
@@ -1499,6 +1520,8 @@ def run_nulling_cdf_experiment(
             "raw_snr_all": raw_snr_all,
             "raw_sinr_all": raw_sinr_all,
             "raw_inr_all": raw_inr_all,
+            "raw_undetected_inr_all": raw_undetected_inr_all,
+            "undetected_inr_sample_ids": undetected_inr_sample_ids,
             "true_snr_all": true_snr_all,
             "true_sinr_all": true_sinr_all,
             "est_snr_all": est_snr_all,
@@ -1881,6 +1904,9 @@ def run_nulling_cdf_experiment(
                     "pair_counts_by_tx": pair_counts_by_tx.copy(),
                     "detected_ntn_count": int(detected_rx_union.size),
                     "interfered_ntn_count": interfered_ntn_count,
+                    "undetected_linked_ntn_count": int(np.count_nonzero(
+                        np.any(np.abs(h_ntn_all) > 0, axis=(1, 2, 3))
+                        & ~np.isin(np.arange(num_ntn_rx), detected_rx_union))),
                     "satellite_azimuth_deg": float(sat_azimuth_deg),
                     "satellite_elevation_deg": float(sat_elevation_deg),
                     "satellite_look_pos": sat_look_pos.copy(),
@@ -1914,12 +1940,18 @@ def run_nulling_cdf_experiment(
                     max_detected_b_terms=resolved_b_term_limit,
                     print_music_u_corr=bool(print_music_u_corr),
                     oracle_path_channels=(dl_path_catalog["path_channels"] if max_depth > 0 else None),
+                    detected_rx_indices=detected_rx_union,
                     eps=eps,
                 )
 
                 raw_snr_all.extend(np.asarray(round_out["raw_snr_db"], dtype=np.float64).tolist())
                 raw_sinr_all.extend(np.asarray(round_out["raw_sinr_db"], dtype=np.float64).tolist())
                 raw_inr_all.extend(np.asarray(round_out["raw_inr_db"], dtype=np.float64).tolist())
+                case_accumulators[percentage]["raw_undetected_inr_all"].extend(
+                    round_out["raw_undetected_inr_db"].tolist())
+                case_accumulators[percentage]["undetected_inr_sample_ids"].extend(
+                    (int(sim_idx), int(round_idx), int(rx))
+                    for rx in round_out["undetected_inr_rx_indices"])
                 for lambda_ in lambda_list:
                     true_snr_all[lambda_].extend(
                         np.asarray(round_out["true_snr_db"][lambda_], dtype=np.float64).tolist()
@@ -1978,6 +2010,10 @@ def run_nulling_cdf_experiment(
             "raw_snr_db": np.asarray(raw_snr_all, dtype=np.float64),
             "raw_sinr_db": np.asarray(raw_sinr_all, dtype=np.float64),
             "raw_inr_db": np.asarray(raw_inr_all, dtype=np.float64),
+            "raw_undetected_inr_db": np.asarray(
+                case_accumulators[percentage]["raw_undetected_inr_all"], dtype=np.float64),
+            "undetected_inr_sample_ids": np.asarray(
+                case_accumulators[percentage]["undetected_inr_sample_ids"], dtype=int).reshape(-1, 3),
             "true_snr_db": {lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in true_snr_all.items()},
             "true_sinr_db": {
                 lambda_: np.asarray(vals, dtype=np.float64) for lambda_, vals in true_sinr_all.items()
@@ -2054,6 +2090,9 @@ def save_experiment_metrics(
         "raw_snr_db": np.asarray(experiment_out["raw_snr_db"], dtype=np.float64),
         "raw_sinr_db": np.asarray(experiment_out.get("raw_sinr_db", np.empty((0,), dtype=np.float64)), dtype=np.float64),
         "raw_inr_db": np.asarray(experiment_out["raw_inr_db"], dtype=np.float64),
+        "raw_undetected_inr_db": np.asarray(experiment_out.get("raw_undetected_inr_db", []), dtype=np.float64),
+        "undetected_inr_sample_ids": np.asarray(
+            experiment_out.get("undetected_inr_sample_ids", []), dtype=int).reshape(-1, 3),
         "lambda_ranges": np.asarray(experiment_out["lambda_ranges"], dtype=np.float64),
         "lambda_ranges_music_est": np.asarray(
             experiment_out.get("lambda_ranges_music_est", np.empty((0,), dtype=np.float64)),

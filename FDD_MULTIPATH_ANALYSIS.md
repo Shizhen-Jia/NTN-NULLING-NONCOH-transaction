@@ -423,24 +423,24 @@ $$
 The parameter cell of `Nulling_CDF_SectorDrop.ipynb` now includes:
 
 ```python
-f_dl = 7e9
-ul_frequency_percentages = [-20.0, -10.0, -5.0, 0.0, 5.0, 10.0, 20.0]
+f_dl = 8e9
+ul_frequency_percentages = [-20.0, -10.0, 0.0, 10.0, 20.0]
 num_macro_sims = 20
 ul_to_dl_mode = "angle"
 ul_dl_power_correction = True  # False restores uncorrected UL power weights
-lambda_ranges_music_est = [1e10, 1e11, 1e12]
+lambda_ranges_music_est = [1e13, 1e14]
 plot_oracle = False
 ```
 
-Percentages are percentage points: `+5` gives 7.35 GHz and `-5` gives 6.65 GHz. The 8 × 8 BS has a fixed physical spacing of `c/(2*f_dl)`, about 21.414 mm. At UL, Sionna's wavelength-normalized spacing is `0.5*f_ul/f_dl`; its element positions in meters remain unchanged. Positive offsets can therefore introduce spatial aliasing; the code does not shrink the physical array to avoid it.
+Percentages are percentage points: `+5` gives 8.4 GHz and `-5` gives 7.6 GHz. The 8 × 8 BS has a fixed physical spacing of `c/(2*f_dl)`, about 18.737 mm. At UL, Sionna's wavelength-normalized spacing is `0.5*f_ul/f_dl`; its element positions in meters remain unchanged. Positive offsets can therefore introduce spatial aliasing; the code does not shrink the physical array to avoid it.
 
 Each macro draws positions and traces DL TN/NTN channels once. Every percentage uses those same positions, satellite direction, sector orientations, DL TN association and scheduling. Nonzero offsets retrace the NTN channel at UL using the retained endpoints and fixed array. UL tracing uses reciprocal BS-to-NTN paths in the existing channel-vector convention, and restores DL scene state on success or failure. Zero offset reuses the original DL sensing channel; `ul_frequency_percentages=[0]` is the regression control.
 
 In `angle` mode, blind MUSIC uses the actual UL electrical array geometry. Its anonymous estimated angles rebuild DL steering vectors; the estimated UL power weights are retained when power correction is off, or multiplied by `(f_UL/f_DL)**2` when it is on. No true DL channels, paired-user angles or DL gains are supplied to the transfer. This tests angular transfer and UL-derived weights, not instantaneous FDD channel reciprocity. Errors in angular estimation and UL aliasing propagate into the DL nulls. In `raw` mode, the UL vectors themselves are reused, providing a direct cross-frequency mismatch comparison. Both modes calculate INR/SNR/SINR against the same DL channels and DL evaluation mask.
 
-The current settings produce $3 \times 7 = 21$ estimated curves plus one no-nulling baseline per CDF. The color legend lists the three lambdas and the black no-nulling baseline. A separate line-style legend lists each UL percentage and frequency; readers combine the two keys. Set `plot_oracle=True` for one additional true-DL oracle per lambda, or `plot_snr=True` for the optional SNR plot. The oracle does not depend on UL frequency and is only drawn once per lambda.
+The current settings produce $2 \times 5 = 10$ estimated curves plus one no-nulling baseline per CDF. The color legend lists the two lambdas and the black no-nulling baseline. The INR plot adds one solid gray pre-nulling curve for UEs undetected at the 0% UL reference (8 GHz). Detection uses the existing truth-matched UE union over all sectors; a UE detected at any sector is excluded from this subset. Only nonzero RT links with positive linear INR contribute; 0 dB remains a valid sample. The underlying subset samples for every UL offset are saved with macro/round/UE IDs in `undetected_inr_samples.csv`, and the plotted reference ECDF in `undetected_inr_cdf.csv`. A separate line-style legend lists each UL percentage and frequency; readers combine the two keys. Set `plot_oracle=True` for one additional true-DL oracle per lambda, or `plot_snr=True` for the optional SNR plot. The oracle does not depend on UL frequency and is only drawn once per lambda.
 
-Runs are saved under `result/<YYYYMMDD_HHMMSS_microseconds>/`. Access one case as:
+Runs are saved under `result/CDF/<YYYYMMDD_HHMMSS_microseconds>/`. Access one case as:
 
 ```python
 case = nulling_cdf_results["by_percentage"][5.0]
@@ -552,7 +552,7 @@ Multipath validation includes a two-path single-UE rank-1 covariance becoming ra
 
 ## Interpreting the frequency sweep
 
-Here "frequency offset" means UL/DL carrier separation, not residual oscillator CFO or Doppler. DL stays at 7 GHz, and UL spans 5.6, 6.3, 6.65, 7, 7.35, 7.7, and 8.4 GHz. The estimator uses an analytic covariance by default; 800 configured snapshots do not introduce finite-snapshot randomness in that mode.
+Here "frequency offset" means UL/DL carrier separation, not residual oscillator CFO or Doppler. The current DL is 8 GHz, and UL spans 6.4, 7.2, 8, 8.8, and 9.6 GHz (the +/-5% cases are omitted). The historical experiments below used 7 GHz DL. The estimator uses an analytic covariance by default; 800 configured snapshots do not introduce finite-snapshot randomness in that mode.
 
 ### What the saved 10-macro experiment actually shows
 
@@ -653,7 +653,7 @@ The run config, metric archives and summary CSV record `ul_dl_power_correction`;
 each frequency case also records `ul_dl_power_scale`. MUSIC archives retain
 `peak_g_hat` as the original UL estimate and add `peak_g_used_for_dl` as the
 weight actually passed toward the beamformer. The logs record the switch and
-factor, and CDF titles state ON or OFF.
+factor. Paper figures omit titles; consult the configuration for this switch.
 
 At fixed estimated directions, a common power factor is equivalent to scaling
 lambda. Compare NTN INR together with TN SNR/SINR: a lower INR alone does not
@@ -662,7 +662,7 @@ recover missed paths or resolve angular aliases.
 
 ## Run archive and plotting
 
-Every execution of the experiment cell creates a fresh local-time directory `result/YYYYMMDD_HHMMSS_microseconds/` before tracing begins. Older runs remain intact. The run records timezone-aware start/end timestamps and its status.
+Every execution of the experiment cell creates a fresh local-time directory `result/CDF/YYYYMMDD_HHMMSS_microseconds/` before tracing begins. Older runs remain intact. The run records timezone-aware start/end timestamps and its status.
 
 - `run_config.json`: actual frequencies, lambda values, random seeds, geometry,
   propagation, MUSIC, noise/power and plotting parameters.
@@ -684,7 +684,7 @@ Every execution of the experiment cell creates a fresh local-time directory `res
 - `cdf_style_map.json`: the color/lambda and dash/frequency mapping.
 - `artifacts.json`: file names and sizes at successful completion.
 
-The color legend lists lambda values and the black no-nulling reference once. The line-style legend lists UL offsets and frequencies once. Optional DL oracle curves use circle markers to distinguish them from the frequency styles.
+Figures use 3.5 x 2.15 inch pages with embedded Times New Roman, no title, and two legends inside the axes. The upper-left legend lists lambda values, the black no-nulling reference and the solid gray undetected reference (INR only). The center-left legend lists UL offsets and frequencies; 0% (8 GHz) uses a solid line. Font files are retained in `sources/fonts/`. Fresh batch seeds are explicit in the notebook and saved configuration. Optional DL oracle curves use circle markers to distinguish them from the frequency styles.
 
 Run all notebook cells with the `sionna20` kernel, or execute:
 

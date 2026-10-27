@@ -20,6 +20,41 @@ import numpy as np
 BS_COLORS = ("#b2182b", "#e08214", "#762a83", "#2166ac")
 
 
+def make_radiomap_solver():
+    """Native solver with a geometric check for planar diffraction hits.
+
+    Sionna's offset visibility ray can hit the plane even when the physical
+    Keller-cone direction is exactly parallel to it. Such a path cannot cross
+    the measurement plane, and its surface-integration Jacobian is undefined.
+    Reject that hit before accumulation; retain every nonparallel sample and
+    leave the requested launch count and its normalization unchanged.
+    """
+    import drjit as dr
+    from sionna.rt import PlanarRadioMap, RadioMapSolver
+
+    class PlaneCheckedRadioMapSolver(RadioMapSolver):
+        def __call__(self, *args, **kwargs):
+            if not kwargs.get("diffraction", False) or kwargs.get("measurement_surface") is not None:
+                return super().__call__(*args, **kwargs)
+            original_add_paths = PlanarRadioMap.add_paths
+
+            def add_paths(radio_map, e_fields, array_w, si, k_world, tx_indices,
+                          active, diffracted_paths, *extra, **options):
+                if diffracted_paths:
+                    active = active & (dr.dot(k_world, si.n) != 0)
+                return original_add_paths(radio_map, e_fields, array_w, si, k_world,
+                                          tx_indices, active, diffracted_paths, *extra, **options)
+
+            # Keep the compatibility check local to this synchronous solve.
+            PlanarRadioMap.add_paths = add_paths
+            try:
+                return super().__call__(*args, **kwargs)
+            finally:
+                PlanarRadioMap.add_paths = original_add_paths
+
+    return PlaneCheckedRadioMapSolver()
+
+
 def save_json(path, value):
     def clean(item):
         if isinstance(item, dict):
