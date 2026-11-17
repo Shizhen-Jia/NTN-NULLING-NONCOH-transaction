@@ -17,6 +17,7 @@ OFFSETS = [-20., -10., 0., 10., 20.]
 EXPONENTS = [11, 13]
 STYLES = ["--", "-.", "-", ":", (0, (5, 1.5, 1, 1.5, 1, 1.5))]
 INSET_BOUNDS = [.075, .20, .41, .27]
+COMBINED_SIZE = (3.5, 4.1)
 ZOOM_WINDOWS = {
     "inr": dict(xlim=(-19., -3.), ylim=(.68, .84), xticks=[-15, -10, -5], yticks=[.7, .8]),
     "sinr": dict(xlim=(24., 29.), ylim=(.65, .82), xticks=[24, 26, 28], yticks=[.7, .8]),
@@ -122,12 +123,15 @@ def render(directory):
           "mathtext.cal": "Times New Roman:italic", "mathtext.sf": "Times New Roman",
           "mathtext.tt": "Times New Roman", "mathtext.fallback": None,
           "pdf.fonttype": 42, "ps.fonttype": 42, "savefig.bbox": None}
-    panels = [("inr", "NTN-UE INR (dB)", "nulling_inr_cdf", "(a) NTN-UE INR"),
-              ("sinr", "TN-UE SINR (dB)", "nulling_tn_sinr_cdf", "(b) TN-UE SINR")]
+    panels = [("inr", "NTN-UE INR (dB)", "nulling_inr_cdf", "(a) NTN-UE INR (dB)"),
+              ("sinr", "TN-UE SINR (dB)", "nulling_tn_sinr_cdf", "(b) TN-UE SINR (dB)")]
     validation = {}
     with plt.rc_context(rc):
-        combined = plt.figure(figsize=(3.5, 4.6))
-        axes = [combined.add_axes([.15, .615, .83, .35]), combined.add_axes([.15, .13, .83, .35])]
+        combined = plt.figure(figsize=COMBINED_SIZE)
+        # Keep each plotting area 1.61 inches tall; reduce only whitespace.
+        axes = [combined.add_axes([.15, bottom / COMBINED_SIZE[1],
+                                   .83, 1.61 / COMBINED_SIZE[1]])
+                for bottom in (2.37, .34)]
         for mode in ("standalone", "combined"):
             for panel, (metric, xlabel, stem, label) in enumerate(panels):
                 if mode == "standalone":
@@ -155,7 +159,8 @@ def render(directory):
                 all_values = np.concatenate(plotted)
                 lo, hi = all_values.min(), all_values.max()
                 pad = .04*(hi-lo)
-                ax.set(xlabel=xlabel, ylabel="CDF", xlim=(lo-pad, hi+pad), ylim=(0, 1))
+                ax.set(xlabel=label if mode == "combined" else xlabel,
+                       ylabel="CDF", xlim=(lo-pad, hi+pad), ylim=(0, 1))
                 ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
                 ax.set_yticks(np.linspace(0, 1, 6))
                 ax.grid(True, alpha=.25, linewidth=.4)
@@ -170,7 +175,6 @@ def render(directory):
                                    ncol=2, columnspacing=.75,
                                    **{**opts, "fontsize": 6.2, "labelspacing": .18})
                 inset = add_frequency_inset(ax, metric, colored_lines, colors)
-                text = ax.text(.5, -.30, label, transform=ax.transAxes, ha="center", va="center", fontsize=8) if mode == "combined" else None
                 fig.canvas.draw()
                 renderer = fig.canvas.get_renderer()
                 b1, b2, inner = first.get_window_extent(renderer), second.get_window_extent(renderer), ax.get_window_extent()
@@ -186,13 +190,14 @@ def render(directory):
                     for box in (b1, b2):
                         assert not path.intersects_bbox(box, filled=False), (mode, metric, 'Legend hides a main curve')
                 assert len(ax.lines) == (12 if metric == "inr" else 11)
-                if text is not None:
-                    box = text.get_window_extent(renderer)
-                    assert fig.bbox.contains(box.x0, box.y0) and fig.bbox.contains(box.x1, box.y1)
-                    assert not box.overlaps(ax.xaxis.label.get_window_extent(renderer))
+                label_box = ax.xaxis.label.get_window_extent(renderer)
+                assert fig.bbox.contains(label_box.x0, label_box.y0) and fig.bbox.contains(label_box.x1, label_box.y1)
+                if mode == "combined" and panel == 0:
+                    assert not label_box.overlaps(axes[1].get_window_extent(renderer))
                 validation[f"{mode}_{metric}"] = dict(curves=len(ax.lines), no_nulling_curves=1,
                     baseline_samples=len(baseline[metric]), legends_inside=True, legends_nonoverlapping=True,
                     all_samples_visible=True, size_inches=fig.get_size_inches().tolist(),
+                    xlabel=ax.get_xlabel(), xlabel_inside_figure=True,
                     inset=dict(bounds_axes=INSET_BOUNDS, **ZOOM_WINDOWS[metric],
                                curves=len(inset.lines), lambda_exponents=EXPONENTS,
                                all_original_cdf_samples_retained=True, cdf_not_renormalized=True,
@@ -210,7 +215,7 @@ def render(directory):
         ul_offsets=OFFSETS, ul_line_styles=STYLES, same_frequency_solid=True,
         no_nulling=dict(color="black", count=1, deduplicated=True),
         undetected=dict(color="0.5", linestyle="-", count=len(undetected)),
-        combined_panels=[p[3] for p in panels], combined_size_inches=[3.5, 4.6],
+        combined_panels=[p[3] for p in panels], combined_size_inches=list(COMBINED_SIZE),
         inset_bounds_axes=INSET_BOUNDS, zoom_windows=ZOOM_WINDOWS))
     destination = directory / "sources/cdf_experiments"
     destination.mkdir(exist_ok=True, parents=True)
